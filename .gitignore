@@ -1,0 +1,28 @@
+# python
+**/*.pyc
+__pycache__/
+*.egg-info/
+.coverage
+
+# editor + system
+*.swp
+.vscode/
+.idea/
+.ipynb_checkpoints/
+.DS_Store
+
+# build artifacts
+build/
+dist/
+
+# python venv
+.venv/
+
+# local data caches (parquet / per-gauge hourly history)
+*.parquet
+
+# secrets — never commit API keys
+.env
+.env.local
+*.env.local
+secrets.env

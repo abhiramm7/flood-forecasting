@@ -1,0 +1,15 @@
+{
+  "models": [
+    {
+      "id": "dmv-cnn-12h",
+      "name": "DMV CNN — 12h flood warning (hourly)",
+      "short": "DMV-CNN 12h",
+      "description": "Two-branch 1D CNN trained per gauge on 3 years of hourly USGS streamflow + Open-Meteo ERA5 forcings. Input: past 24h flow + precip + temp + next 12h precip forecast. Output: 12-hour-ahead flow trajectory. CPU-friendly, ~90s training per gauge.",
+      "family": "cnn",
+      "horizon_days": 0.5,
+      "source": "live-cnn",
+      "trained_at": "2026-06-05",
+      "metrics": {}
+    }
+  ]
+}

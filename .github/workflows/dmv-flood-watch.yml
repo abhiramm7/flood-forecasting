@@ -1,0 +1,82 @@
+# DMV Flood Watch — live inference + GitHub Pages deploy.
+#
+# Two triggers:
+#   - schedule: every 2 hours -> re-run CNN inference + redeploy
+#   - push to web/**: just redeploy (e.g., a CSS/JS fix)
+#   - workflow_dispatch: manual run
+#
+# The cron path uses live USGS NWIS + Open-Meteo APIs directly (no parquet
+# cache). The CNN checkpoints (checkpoints/*.pt, ~50 KB each) are committed
+# to the repo and loaded at inference time.
+#
+# Note on the auto-commit: GitHub's default GITHUB_TOKEN does NOT trigger
+# downstream workflow runs, so the auto-commit from the schedule path won't
+# loop back into another run.
+
+name: dmv-flood-watch
+on:
+  schedule:
+    - cron: '0 */2 * * *'   # every 2 hours UTC
+  push:
+    branches: [main]
+    paths: ['web/**', '.github/workflows/dmv-flood-watch.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: web/flood_warning/requirements-ci.txt
+
+      - name: Install Python deps
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: pip install -r web/flood_warning/requirements-ci.txt
+
+      - name: Run CNN live inference + backtest
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          USGS_API_KEY: ${{ secrets.USGS_API_KEY }}
+        run: |
+          python -m web.flood_warning.predict
+          python -m web.flood_warning.integrate
+
+      - name: Auto-commit refreshed predictions
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: 'auto: refresh CNN predictions'
+          file_pattern: |
+            web/models/dmv-cnn-12h/preds.json
+            web/sites.json
+            web/models/manifest.json
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
