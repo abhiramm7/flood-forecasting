@@ -78,12 +78,11 @@ def predict_gauge(gauge_id: str) -> dict | None:
     model.load_state_dict(ckpt['state_dict'])
     model.eval()
 
+    from .fetch import fetch_hourly_live
+    df_live = fetch_hourly_live(gauge_id, days_back=2)
     site = BY_ID[gauge_id]
-    flow = fetch_recent_usgs(gauge_id, hours=PAST_STEPS + 6)
-    weather = fetch_openmeteo_window(site['lat'], site['lon'])
 
-    # Find the most recent hour we have a flow observation for
-    flow_valid = flow.dropna()
+    flow_valid = df_live['flow_m3s'].dropna()
     if len(flow_valid) < PAST_STEPS:
         print(f'  {gauge_id}: not enough recent USGS hours ({len(flow_valid)})')
         return None
@@ -93,20 +92,23 @@ def predict_gauge(gauge_id: str) -> dict | None:
     fut_idx = pd.date_range(start=issue_time + pd.Timedelta(hours=1),
                             periods=FUTURE_STEPS, freq='h')
 
-    flow_past = flow.reindex(past_idx).interpolate(limit=4).values
-    precip_past = weather['precipitation'].reindex(past_idx).fillna(0).values
-    precip_fut = weather['precipitation'].reindex(fut_idx).fillna(0).values
-    temp_past = weather['temperature_2m'].reindex(past_idx).interpolate(limit=4).values
+    flow_past = df_live['flow_m3s'].reindex(past_idx).interpolate(limit=4).values
+    precip_past = df_live['precip_mm'].reindex(past_idx).fillna(0).values
+    precip_fut = df_live['precip_mm'].reindex(fut_idx).fillna(0).values
+    temp_past = df_live['temp_c'].reindex(past_idx).interpolate(limit=4).values
+    sm_past = (df_live['sm_surface'].reindex(past_idx)
+                .ffill().bfill().fillna(scaler.sm_mean).values)
 
     if np.isnan(flow_past).any() or np.isnan(temp_past).any():
         print(f'  {gauge_id}: missing values in input window')
         return None
 
-    # Encode and run
+    # Encode and run (4-channel past stream + 1-channel future precip)
     past_enc = np.stack([
         scaler.encode_flow(flow_past),
         scaler.encode_precip(precip_past),
         scaler.encode_temp(temp_past),
+        scaler.encode_sm(sm_past),
     ], axis=0).astype(np.float32)
     fut_enc = scaler.encode_precip(precip_fut)[None, :].astype(np.float32)
 
@@ -129,10 +131,10 @@ def predict_gauge(gauge_id: str) -> dict | None:
                        'p': round(float(v), 3),
                        'precip_mm': round(float(p), 2)})
 
-    # Historical backtest — rolling 1h-ahead predictions over the last 7 days
+    # Historical backtest — rolling 1h-ahead predictions over the last 30 days
     # so the UI can show model-vs-actual performance for the recent past.
     backtest_series = backtest_gauge(gauge_id, model, scaler, cfg,
-                                      days_back=7, issue_anchor=issue_time)
+                                      days_back=30, issue_anchor=issue_time)
 
     return {
         'id': gauge_id,
@@ -143,7 +145,7 @@ def predict_gauge(gauge_id: str) -> dict | None:
     }
 
 
-def backtest_gauge(gauge_id: str, model, scaler, cfg, days_back: int = 7,
+def backtest_gauge(gauge_id: str, model, scaler, cfg, days_back: int = 30,
                    issue_anchor: pd.Timestamp | None = None) -> list[dict]:
     """For each hour in the last `days_back` days, generate the CNN's 12-hour
     forecast that *would* have been issued at that hour. Return a list of
@@ -171,8 +173,12 @@ def backtest_gauge(gauge_id: str, model, scaler, cfg, days_back: int = 7,
 
     past_steps = cfg['past_steps']
     future_steps = cfg['future_steps']
-    rows = []
-    # Vectorize: stack all valid windows into one batch
+    # Pre-resolve soil-moisture from ERA5 with forward/back fill so the
+    # 5-day archive lag near "now" doesn't kill recent windows.
+    if 'sm_surface' in df.columns:
+        sm_series = df['sm_surface'].ffill().bfill()
+    else:
+        sm_series = pd.Series(scaler.sm_mean, index=df.index)
     times = pd.date_range(start=start_t, end=end_t, freq='h')
     past_batch = []
     fut_batch = []
@@ -185,12 +191,14 @@ def backtest_gauge(gauge_id: str, model, scaler, cfg, days_back: int = 7,
         precip_past = df['precip_mm'].reindex(past_idx).fillna(0).values
         precip_fut = df['precip_mm'].reindex(fut_idx).fillna(0).values
         temp_past = df['temp_c'].reindex(past_idx).interpolate(limit=2).values
+        sm_past = sm_series.reindex(past_idx).fillna(scaler.sm_mean).values
         if np.isnan(flow_past).any() or np.isnan(temp_past).any():
             continue
         past_enc = np.stack([
             scaler.encode_flow(flow_past),
             scaler.encode_precip(precip_past),
             scaler.encode_temp(temp_past),
+            scaler.encode_sm(sm_past),
         ], axis=0).astype(np.float32)
         fut_enc = scaler.encode_precip(precip_fut)[None, :].astype(np.float32)
         past_batch.append(past_enc)

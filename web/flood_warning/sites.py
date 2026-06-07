@@ -1,9 +1,12 @@
-"""10 priority DMV gauges for the hourly flood warning prototype.
+"""7 DC-area USGS gauges within ~20 km of downtown.
 
 Mix of urban (Anacostia, Rock Creek, Watts Branch), suburban (Difficult Run,
-Goose Creek), and rural/mainstem (Potomac at Little Falls + Point of Rocks,
-Catoctin). Drainage areas span 3 sq mi (Watts Branch) to 11,500 sq mi
-(Potomac at Little Falls) — gives the CNN a broad range to learn from.
+NW Anacostia), and the Potomac mainstem at Little Falls. Drainage areas span
+3.6 mi² (Watts Branch) to 11,560 mi² (Potomac at Little Falls) — the CNN gets
+a broad range of basin behaviors to learn from at this hourly cadence.
+
+Dropped from earlier set: Potomac at Point of Rocks, Goose Creek, Catoctin
+Creek — all >40 km out of the DC core.
 """
 
 SITES = [
@@ -13,13 +16,6 @@ SITES = [
         'drainage_sqmi': 11560,
         'kind': 'mainstem',
         'notes': 'The headline DC-region gauge. Drains 11,500 sq mi.',
-    },
-    {
-        'id': '01638500', 'name': 'Potomac at Point of Rocks', 'short': 'Potomac POR',
-        'lat': 39.2736, 'lon': -77.5431,
-        'drainage_sqmi': 9651,
-        'kind': 'mainstem',
-        'notes': 'Upstream Potomac, ~50 mi above DC.',
     },
     {
         'id': '01648000', 'name': 'Rock Creek at Sherrill Dr', 'short': 'Rock Creek',
@@ -62,20 +58,6 @@ SITES = [
         'drainage_sqmi': 57.9,
         'kind': 'suburban',
         'notes': 'NoVa suburban watershed, flashy on storms.',
-    },
-    {
-        'id': '01644000', 'name': 'Goose Creek nr Leesburg', 'short': 'Goose Creek',
-        'lat': 39.0196, 'lon': -77.5775,
-        'drainage_sqmi': 332,
-        'kind': 'suburban',
-        'notes': 'Loudoun County, drains into Potomac.',
-    },
-    {
-        'id': '01637500', 'name': 'Catoctin Creek nr Middletown', 'short': 'Catoctin',
-        'lat': 39.4273, 'lon': -77.5562,
-        'drainage_sqmi': 66.9,
-        'kind': 'rural',
-        'notes': 'Frederick County, MD farmland.',
     },
 ]
 

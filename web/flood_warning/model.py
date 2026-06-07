@@ -16,7 +16,7 @@ import torch.nn.functional as F
 
 
 class FloodCNN(nn.Module):
-    def __init__(self, n_past_features: int = 3, n_future_features: int = 1,
+    def __init__(self, n_past_features: int = 4, n_future_features: int = 1,
                  past_steps: int = 24, future_steps: int = 12,
                  hidden: int = 32, kernel: int = 3, dropout: float = 0.1):
         super().__init__()

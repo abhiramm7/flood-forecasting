@@ -1,9 +1,13 @@
 """Sliding-window dataset for the hourly CNN.
 
 Each sample:
-  past:   (3, 24)  channels [flow_m3s, precip_mm, temp_c] for hours t-24..t-1
-  future: (1, 12)  channel  [precip_mm]                    for hours t..t+11
-  target: (12,)    flow_m3s                                 for hours t..t+11
+  past:   (4, 24)  channels [flow_m3s, precip_mm, temp_c, sm] hours t-24..t-1
+  future: (1, 12)  channel  [precip_mm]                       hours t..t+11
+  target: (12,)    flow_m3s                                    hours t..t+11
+
+The 4th past channel is ERA5-Land surface soil moisture — antecedent-wetness
+proxy for groundwater storage, gives the CNN a meaningful signal of how
+saturated the basin is before a storm hits.
 
 Normalization: log1p on flow + precip (right-skewed), z-score everything.
 Normalization stats are computed on the training split only.
@@ -32,6 +36,7 @@ class Scaler:
     flow_log_mean: float; flow_log_std: float
     precip_log_mean: float; precip_log_std: float
     temp_mean: float; temp_std: float
+    sm_mean: float = 0.35; sm_std: float = 0.10   # ERA5 surface SM defaults
 
     def to_dict(self):
         return self.__dict__
@@ -48,22 +53,29 @@ class Scaler:
         return (np.log1p(np.clip(x, 0, None)) - self.precip_log_mean) / self.precip_log_std
     def encode_temp(self, x):
         return (x - self.temp_mean) / self.temp_std
+    def encode_sm(self, x):
+        return (x - self.sm_mean) / self.sm_std
 
 
 def build_windows(df: pd.DataFrame, scaler: Scaler | None = None
                   ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[pd.Timestamp]]:
     """Slide a 24+12 window across the hourly DataFrame, dropping any window
-    with missing flow or precip values. Returns (past, future, target, target_t0).
+    with missing flow values. Returns (past, future, target, target_t0).
+
+    Past stream has 4 channels: flow, precip, temperature, surface soil
+    moisture. Future stream is just forecast precip.
     """
     flow = df['flow_m3s'].values
     precip = df['precip_mm'].fillna(0).values
-    temp = df['temp_c'].fillna(temp_mean := np.nanmean(df['temp_c'])).values
+    temp = df['temp_c'].fillna(np.nanmean(df['temp_c'])).values
+    # ERA5 SM has gaps near present; ffill in the caller covers the lag.
+    sm = df['sm_surface'].ffill().bfill().fillna(0.35).values
     idx = df.index
 
     n = len(df)
     win = PAST_STEPS + FUTURE_STEPS
     if n < win:
-        return (np.zeros((0, 3, PAST_STEPS)), np.zeros((0, 1, FUTURE_STEPS)),
+        return (np.zeros((0, 4, PAST_STEPS)), np.zeros((0, 1, FUTURE_STEPS)),
                 np.zeros((0, FUTURE_STEPS)), [])
 
     past_list, fut_list, tgt_list, t0_list = [], [], [], []
@@ -74,6 +86,7 @@ def build_windows(df: pd.DataFrame, scaler: Scaler | None = None
         p_past = precip[i:i + PAST_STEPS]
         p_fut = precip[i + PAST_STEPS:i + PAST_STEPS + FUTURE_STEPS]
         t_past = temp[i:i + PAST_STEPS]
+        sm_past = sm[i:i + PAST_STEPS]
         flow_past = flow[i:i + PAST_STEPS]
         flow_fut = flow[i + PAST_STEPS:i + PAST_STEPS + FUTURE_STEPS]
 
@@ -83,16 +96,17 @@ def build_windows(df: pd.DataFrame, scaler: Scaler | None = None
             p_past = scaler.encode_precip(p_past)
             p_fut = scaler.encode_precip(p_fut)
             t_past = scaler.encode_temp(t_past)
+            sm_past = scaler.encode_sm(sm_past)
         else:
             flow_fut_scaled = flow_fut
 
-        past_list.append(np.stack([flow_past, p_past, t_past], axis=0))
+        past_list.append(np.stack([flow_past, p_past, t_past, sm_past], axis=0))
         fut_list.append(p_fut[None, :])
         tgt_list.append(flow_fut_scaled)
         t0_list.append(idx[i + PAST_STEPS])
 
     if not past_list:
-        return (np.zeros((0, 3, PAST_STEPS)), np.zeros((0, 1, FUTURE_STEPS)),
+        return (np.zeros((0, 4, PAST_STEPS)), np.zeros((0, 1, FUTURE_STEPS)),
                 np.zeros((0, FUTURE_STEPS)), [])
     return (np.stack(past_list).astype(np.float32),
             np.stack(fut_list).astype(np.float32),
@@ -105,12 +119,15 @@ def fit_scaler(df: pd.DataFrame) -> Scaler:
     flow = df['flow_m3s'].dropna().values
     precip = df['precip_mm'].dropna().values
     temp = df['temp_c'].dropna().values
+    sm = df['sm_surface'].dropna().values
     flow_log = np.log1p(np.clip(flow, 0, None))
     precip_log = np.log1p(np.clip(precip, 0, None))
     return Scaler(
         flow_log_mean=float(flow_log.mean()), flow_log_std=float(flow_log.std() + 1e-9),
         precip_log_mean=float(precip_log.mean()), precip_log_std=float(precip_log.std() + 1e-9),
         temp_mean=float(temp.mean()), temp_std=float(temp.std() + 1e-9),
+        sm_mean=float(sm.mean()) if len(sm) else 0.35,
+        sm_std=float(sm.std() + 1e-9) if len(sm) else 0.10,
     )
 
 

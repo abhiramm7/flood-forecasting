@@ -84,15 +84,17 @@ def fetch_usgs_hourly(gauge_id: str, start: str, end: str) -> pd.Series:
 
 def fetch_openmeteo_hourly(lat: float, lon: float,
                             start: str, end: str) -> pd.DataFrame:
-    """Open-Meteo Archive (ERA5) hourly precip/temp/pressure at lat/lon.
+    """Open-Meteo Archive (ERA5) hourly forcings at lat/lon.
 
-    Hourly precip is the actual rainfall during that hour (mm), good for
-    storm-response training.
+    Hourly precip is the actual rainfall during that hour (mm). Soil moisture
+    (0-7cm + 7-28cm layers, m³/m³) gives the model an antecedent-wetness
+    signal — proxy for groundwater storage, drives runoff response to rain.
     """
     url = ('https://archive-api.open-meteo.com/v1/archive?'
            f'latitude={lat:.4f}&longitude={lon:.4f}'
            f'&start_date={start}&end_date={end}'
-           f'&hourly=precipitation,temperature_2m,surface_pressure'
+           f'&hourly=precipitation,temperature_2m,surface_pressure,'
+           f'soil_moisture_0_to_7cm,soil_moisture_7_to_28cm'
            f'&timezone=GMT')
     payload = json.loads(_http_get(url))
     df = pd.DataFrame(payload['hourly']).rename(columns={'time': 't'})
@@ -122,10 +124,16 @@ def fetch_site(site: dict, years_back: int = 3) -> pd.DataFrame:
             'precipitation': 'precip_mm',
             'temperature_2m': 'temp_c',
             'surface_pressure': 'pressure_hpa',
+            'soil_moisture_0_to_7cm': 'sm_surface',
+            'soil_moisture_7_to_28cm': 'sm_subsurface',
         })], axis=1, join='outer')
     df = df.loc[(df.index >= start) & (df.index < end)].sort_index()
-    # Forward-fill small gaps in flow (USGS sometimes missing 1-2 hours)
+    # Forward-fill small gaps in flow (USGS sometimes missing 1-2 hours).
+    # Soil moisture from ERA5 lags ~5 days; forward-fill across the gap so
+    # the recent window has a usable value.
     df['flow_m3s'] = df['flow_m3s'].interpolate(limit=4)
+    df['sm_surface'] = df['sm_surface'].ffill(limit=24 * 7)
+    df['sm_subsurface'] = df['sm_subsurface'].ffill(limit=24 * 7)
 
     out_dir = DATA_DIR / site['id']
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -147,7 +155,8 @@ def fetch_all(years_back: int = 3):
 def fetch_openmeteo_combined(lat: float, lon: float,
                               past_days: int = 8, forecast_days: int = 2) -> pd.DataFrame:
     """Single Open-Meteo Forecast call covering past_days + forecast_days
-    hourly. Used for live CI inference where we don't want to write parquet."""
+    hourly. The Forecast endpoint doesn't expose soil moisture — that's pulled
+    from the Archive endpoint separately."""
     url = ('https://api.open-meteo.com/v1/forecast?'
            f'latitude={lat:.4f}&longitude={lon:.4f}'
            f'&hourly=precipitation,temperature_2m,surface_pressure'
@@ -159,9 +168,16 @@ def fetch_openmeteo_combined(lat: float, lon: float,
 
 
 def fetch_hourly_live(gauge_id: str, days_back: int = 8) -> pd.DataFrame:
-    """Fetch the last `days_back` days of hourly USGS + Open-Meteo for one
-    gauge entirely in-memory. Used by predict.py when running in CI where
-    the parquet cache from fetch_all() is unavailable."""
+    """Last `days_back` days of hourly USGS + Open-Meteo for one gauge, fully
+    in-memory. Used in CI where the parquet cache from fetch_all() is gone.
+
+    Two-endpoint merge:
+      - Forecast (`past_days` + `forecast_days`) for precip / temp / pressure.
+        Covers up to "today + 16d" with no gap.
+      - Archive (`start_date` + `end_date`) for soil moisture, since ERA5-Land
+        is the only public source for that field. Lags ~5 days; we forward-fill
+        the tail so the recent window has a value.
+    """
     site = BY_ID[gauge_id]
     end = pd.Timestamp.utcnow().tz_localize(None)
     start = end - pd.Timedelta(days=days_back + 1)
@@ -169,12 +185,28 @@ def fetch_hourly_live(gauge_id: str, days_back: int = 8) -> pd.DataFrame:
                               end.strftime('%Y-%m-%d'))
     weather = fetch_openmeteo_combined(site['lat'], site['lon'],
                                         past_days=days_back, forecast_days=2)
-    df = pd.concat([flow, weather.rename(columns={
-        'precipitation': 'precip_mm',
-        'temperature_2m': 'temp_c',
-        'surface_pressure': 'pressure_hpa',
-    })], axis=1, join='outer').sort_index()
+    # Archive endpoint rejects end_date in the future; cap at yesterday and
+    # let ffill cover the remainder.
+    sm_end = min(end, pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=1))
+    sm = fetch_openmeteo_hourly(
+        site['lat'], site['lon'],
+        start.strftime('%Y-%m-%d'),
+        sm_end.strftime('%Y-%m-%d'),
+    )[['soil_moisture_0_to_7cm', 'soil_moisture_7_to_28cm']]
+    sm = sm.rename(columns={'soil_moisture_0_to_7cm': 'sm_surface',
+                              'soil_moisture_7_to_28cm': 'sm_subsurface'})
+    df = pd.concat([
+        flow,
+        weather.rename(columns={
+            'precipitation': 'precip_mm',
+            'temperature_2m': 'temp_c',
+            'surface_pressure': 'pressure_hpa',
+        }),
+        sm,
+    ], axis=1, join='outer').sort_index()
     df['flow_m3s'] = df['flow_m3s'].interpolate(limit=4)
+    df['sm_surface'] = df['sm_surface'].ffill(limit=24 * 7)
+    df['sm_subsurface'] = df['sm_subsurface'].ffill(limit=24 * 7)
     return df
 
 
