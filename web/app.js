@@ -1,60 +1,66 @@
-/* DMV Flood Watch — flood warning system frontend.
+/* DMV Flood Watch — UI driver.
  *
  * Layout:
- *   ┌─────────────────────────┬───────────────┐
- *   │           MAP           │  GAUGE FEED   │
- *   │       + NEXRAD radar    │  (sorted by   │
- *   │       (severity dots)   │   severity)   │
- *   ├─────────────────────────┴───────────────┤
- *   │  STREAMFLOW: 7d backtest + 12h forecast │
- *   └─────────────────────────────────────────┘
+ *   Header (status banner)
+ *   ┌──────────────────────┬────────────────────┐
+ *   │   MAP + radar        │   GAUGE DETAIL     │
+ *   │                      │   - now / peak     │
+ *   │                      │   - threshold bar  │
+ *   │                      │   - other gauges   │
+ *   ├──────────────────────┴────────────┬───────┤
+ *   │   STREAMFLOW CHART (30d + 12h)    │ MODEL │
+ *   │                                   │ + QPF │
+ *   └───────────────────────────────────┴───────┘
  *
- * Single model: the 1D CNN at web/models/dmv-cnn-12h/. The picker UI is
- * preserved for forward-compat but currently only one entry is registered
- * in models/manifest.json.
+ * Data: sites.json (gauges + metadata) + models/dmv-cnn-12h/preds.json
+ * (per-gauge backtest + series). Single model, no picker.
  */
 
-const FMT_FULL = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+const FMT_FULL = new Intl.DateTimeFormat('en-US',
+  { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+const FMT_REL = new Intl.RelativeTimeFormat('en-US', { numeric: 'auto' });
 const M3S_TO_CFS = 35.3147;
 const HOUR_MS = 3600_000;
 
 const state = {
   sites: null,
-  preds: null,             // basin id -> {id, issue_time, series, backtest}
+  preds: null,            // gauge id -> {issue_time, series, backtest, metrics}
   unit: 'm3s',
   selected: null,
   map: null,
   radarLayer: null,
   radarOn: true,
   chart: null,
+  precipChart: null,
   markers: new Map(),
-  updated: null,            // when the prediction data was generated
+  updated: null,
 };
 
 // ---- helpers --------------------------------------------------------------
 
-const fmtFlow = (v) => {
+const fmtFlow = (v, signed = false) => {
   if (v == null || !isFinite(v)) return '—';
   const x = state.unit === 'cfs' ? v * M3S_TO_CFS : v;
-  if (x >= 1000) return Math.round(x).toLocaleString();
-  if (x >= 100) return x.toFixed(0);
-  if (x >= 10) return x.toFixed(1);
-  return x.toFixed(2);
+  const abs = Math.abs(x);
+  let s;
+  if (abs >= 1000) s = Math.round(x).toLocaleString();
+  else if (abs >= 100) s = x.toFixed(0);
+  else if (abs >= 10) s = x.toFixed(1);
+  else s = x.toFixed(2);
+  return signed && x >= 0 ? '+' + s : s;
 };
 const unitLabel = () => state.unit === 'cfs' ? 'cfs' : 'm³/s';
+
 const severityFor = (flow, th) => {
-  if (!th || flow == null) return 'untrained';
+  if (!th || flow == null) return null;
   if (flow >= th.extreme) return 'extreme';
   if (flow >= th.danger) return 'danger';
   if (flow >= th.warning) return 'warn';
   return 'ok';
 };
-const sevRank = { ok: 0, untrained: 0, warn: 1, danger: 2, extreme: 3 };
-const sevLabel = { ok: 'normal', warn: 'warning', danger: 'danger', extreme: 'extreme', untrained: 'no data' };
+const sevRank = { ok: 0, warn: 1, danger: 2, extreme: 3 };
 
 function liveNow(s) {
-  // Prefer the instantaneous (15-min) reading; fall back to last hourly obs
-  // in the CNN's backtest, then to the daily values from sites.json.
   if (s.live_now?.o != null) return { o: s.live_now.o, d: s.live_now.t || s.live_now.d };
   const pred = state.preds?.get(s.id);
   const lastBacktest = pred?.backtest?.filter(b => b.o != null)?.slice(-1)[0];
@@ -63,7 +69,6 @@ function liveNow(s) {
   return null;
 }
 
-/** Worst-case forecast flow for a site (max over the 12-hour window). */
 function forecastPeak(s) {
   const pred = state.preds?.get(s.id);
   if (!pred?.series?.length) return null;
@@ -74,33 +79,30 @@ function forecastPeak(s) {
   return peak === -Infinity ? null : { o: peak, d: peakT };
 }
 
-/** Hours from now until forecast crosses the warning threshold (or null). */
-function hoursToThreshold(s, level = 'warning') {
-  const pred = state.preds?.get(s.id);
-  if (!pred?.series?.length || !s.thresholds) return null;
-  const th = s.thresholds[level];
-  if (th == null) return null;
-  const now = liveNow(s);
-  const nowT = now ? new Date(now.d).getTime() : Date.now();
-  for (const p of pred.series) {
-    if (p.p == null) continue;
-    if (p.p >= th) {
-      const dt = new Date(p.d).getTime();
-      return Math.max(0, (dt - nowT) / HOUR_MS);
-    }
-  }
-  return null;
-}
-
-/** Best severity for a site combining current + peak-forecast. */
 function siteSeverity(s) {
   const now = liveNow(s);
   const peak = forecastPeak(s);
-  const sevs = [];
-  if (now && s.thresholds) sevs.push(severityFor(now.o, s.thresholds));
-  if (peak && s.thresholds) sevs.push(severityFor(peak.o, s.thresholds));
-  if (!sevs.length) return 'untrained';
-  return sevs.reduce((a, b) => sevRank[b] > sevRank[a] ? b : a);
+  let worst = null;
+  for (const r of [now, peak]) {
+    if (r && s.thresholds) {
+      const sev = severityFor(r.o, s.thresholds);
+      if (sev && (!worst || sevRank[sev] > sevRank[worst])) worst = sev;
+    }
+  }
+  return worst;
+}
+
+function backtestNSE(s) {
+  const pred = state.preds?.get(s.id);
+  if (!pred?.backtest?.length) return null;
+  const paired = pred.backtest.filter(b => b.o != null && b.p1 != null);
+  if (paired.length < 20) return null;
+  const obs = paired.map(b => b.o);
+  const sim = paired.map(b => b.p1);
+  const mean = obs.reduce((a, c) => a + c, 0) / obs.length;
+  const ss = obs.reduce((a, o, i) => a + (o - sim[i]) ** 2, 0);
+  const st = obs.reduce((a, o) => a + (o - mean) ** 2, 0);
+  return 1 - ss / (st + 1e-9);
 }
 
 // ---- bootstrap ------------------------------------------------------------
@@ -110,16 +112,14 @@ function siteSeverity(s) {
     const sites = await fetch('sites.json').then(r => r.json());
     state.sites = sites.sites;
     state.updated = sites.updated;
-    document.getElementById('updated-sub').textContent =
-      sites.updated ? `last refresh: ${FMT_FULL.format(new Date(sites.updated))}`
-                    : 'monitoring DC / MD / VA gauges';
 
     document.getElementById('unit-toggle').addEventListener('click', e => {
       if (e.target.tagName !== 'BUTTON') return;
       state.unit = e.target.dataset.unit;
       document.querySelectorAll('#unit-toggle button').forEach(b =>
-        b.classList.toggle('active', b.dataset.unit === state.unit));
-      refresh();
+        b.classList.toggle('on', b.dataset.unit === state.unit));
+      if (state.selected) renderDetail(state.selected);
+      renderOtherGauges();
     });
     document.getElementById('radar-toggle').addEventListener('click', toggleRadar);
 
@@ -127,11 +127,8 @@ function siteSeverity(s) {
     await loadPredictions();
   } catch (e) {
     console.error(e);
-    document.body.innerHTML = `<div style="padding:40px;color:#f59e0b;font-family:monospace">
-      Could not load data. Serve this folder:<br>
-      <code style="background:#131821;padding:10px;border-radius:6px;display:block">
-cd web && python3 -m http.server 8765</code>
-      then open http://localhost:8765<br><br>${e}</div>`;
+    document.body.innerHTML = `<div style="padding:40px;color:#d8a93f;font-family:ui-monospace,monospace">
+      Data load failed. Serve <code>web/</code> via a static server and reload.<br><br>${e}</div>`;
   }
 })();
 
@@ -139,82 +136,64 @@ async function loadPredictions() {
   try {
     const data = await fetch('models/dmv-cnn-12h/preds.json').then(r => r.json());
     state.preds = new Map((data.predictions || []).map(p => [p.id, p]));
+    state.predsUpdated = data.updated;
   } catch { state.preds = new Map(); }
   refresh();
 }
 
 function refresh() {
   refreshMarkers();
-  renderHero();
-  renderSummary();
-  renderGaugeList();
+  renderStatusBanner();
+  renderOtherGauges();
   if (!state.selected) {
-    // auto-select the most severe gauge with predictions
-    const monitored = visibleSites().filter(s => state.preds?.get(s.id)?.series?.length);
-    if (monitored.length) {
-      monitored.sort((a, b) => sevRank[siteSeverity(b)] - sevRank[siteSeverity(a)]);
-      select(monitored[0].id);
-      return;
-    }
+    const ranked = state.sites
+      .filter(s => state.preds?.get(s.id)?.series?.length)
+      .sort((a, b) => (sevRank[siteSeverity(b)] || 0) - (sevRank[siteSeverity(a)] || 0));
+    if (ranked.length) { select(ranked[0].id); return; }
   }
-  if (state.selected) renderChart(state.selected);
+  if (state.selected) renderDetail(state.selected);
 }
 
 // ---- map ------------------------------------------------------------------
 
 function setupMap() {
   state.map = L.map('map', { zoomControl: true, preferCanvas: true })
-    .setView([38.8, -77.3], 9);
+    .setView([38.93, -77.05], 10);
 
   L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-    attribution: '&copy; OpenStreetMap &copy; CARTO',
+    attribution: '© OpenStreetMap © CARTO',
     maxZoom: 18, subdomains: 'abcd',
   }).addTo(state.map);
 
-  // NEXRAD composite reflectivity. Newer "n0q" layer is higher-resolution
-  // than the legacy n0r and supports up to 256 dBZ values. Bumped opacity
-  // so visible echoes stand out from the dark basemap.
   state.radarLayer = L.tileLayer.wms(
     'https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0r.cgi', {
       layers: 'nexrad-n0r-900913',
       format: 'image/png', transparent: true,
-      attribution: 'NEXRAD &copy; Iowa State Mesonet',
-      opacity: 0.75,
+      attribution: 'NEXRAD · Iowa State Mesonet',
+      opacity: 0.7,
     });
   state.radarLayer.addTo(state.map);
-
-  // Diagnostic: log when tiles load successfully and when none have echo
-  let radarTilesLoaded = 0;
-  state.radarLayer.on('tileload', () => { radarTilesLoaded++; });
-  state.radarLayer.on('load', () => {
-    console.log(`NEXRAD: ${radarTilesLoaded} tiles loaded (empty tiles mean no precipitation in that area)`);
-  });
-
-  // Markers built on first refresh (depends on model selection for severity).
-}
-
-function visibleSites() {
-  // All 10 monitored gauges. sites.json contains only the trained set now.
-  return state.sites;
 }
 
 function refreshMarkers() {
-  // Clear & rebuild — visibility depends on selected model.
   state.markers.forEach(m => state.map.removeLayer(m));
   state.markers.clear();
 
-  const sites = visibleSites();
   const bounds = [];
-  for (const s of sites) {
+  for (const s of state.sites) {
     if (s.lat == null || s.lon == null) continue;
     bounds.push([s.lat, s.lon]);
-    const sev = siteSeverity(s);
+    const sev = siteSeverity(s) || 'ok';
     const icon = L.divIcon({
       className: '', html: `<div class="m ${sev}" data-id="${s.id}"></div>`,
       iconSize: [14, 14], iconAnchor: [7, 7],
     });
+    const now = liveNow(s);
+    const tip = now
+      ? `<b>${s.name}</b><br>${fmtFlow(now.o)} ${unitLabel()}`
+      : `<b>${s.name}</b><br>no recent data`;
     const m = L.marker([s.lat, s.lon], { icon })
-      .bindTooltip(`<b>${s.name}</b><br>${sevLabel[sev]}`, { direction: 'top' })
+      .bindTooltip(tip, { direction: 'top' })
       .on('click', () => select(s.id));
     m.addTo(state.map);
     state.markers.set(s.id, m);
@@ -229,208 +208,271 @@ function toggleRadar() {
   const btn = document.getElementById('radar-toggle');
   if (state.radarOn) {
     state.map.removeLayer(state.radarLayer);
-    btn.textContent = 'NEXRAD off';
     btn.classList.remove('on');
     state.radarOn = false;
   } else {
     state.radarLayer.addTo(state.map);
-    btn.textContent = 'NEXRAD on';
     btn.classList.add('on');
     state.radarOn = true;
   }
 }
 
-// ---- hero status banner ---------------------------------------------------
+// ---- header status banner ------------------------------------------------
 
-function renderHero() {
-  const hero = document.getElementById('hero');
-  const levelEl = document.getElementById('hero-level');
-  const msgEl = document.getElementById('hero-msg');
-  let worst = 'ok';
-  let worstSite = null;
-  for (const s of visibleSites()) {
+function renderStatusBanner() {
+  let worst = 'ok'; let worstSite = null;
+  for (const s of state.sites) {
     const sev = siteSeverity(s);
-    if (sevRank[sev] > sevRank[worst]) { worst = sev; worstSite = s; }
-  }
-  hero.className = 'hero ' + worst;
-  if (worst === 'extreme') {
-    levelEl.textContent = 'Extreme Flooding';
-    msgEl.textContent = `${worstSite.name} forecast above Q10 (10-yr return level).`;
-  } else if (worst === 'danger') {
-    levelEl.textContent = 'Flood Warning';
-    msgEl.textContent = `${worstSite.name} forecast above Q5 (5-yr return level).`;
-  } else if (worst === 'warn') {
-    levelEl.textContent = 'Watch';
-    msgEl.textContent = `${worstSite.name} approaching Q2 (2-yr return level).`;
-  } else {
-    levelEl.textContent = 'All Clear';
-    const count = visibleSites().filter(s => state.preds?.get(s.id)?.series?.length).length;
-    msgEl.textContent = `${count} gauge${count === 1 ? '' : 's'} monitored · no warning crossings forecast in 12h.`;
-  }
-}
-
-// ---- summary stats --------------------------------------------------------
-
-function renderSummary() {
-  const sites = visibleSites();
-  const monitored = sites.filter(s => state.preds?.get(s.id)?.series?.length);
-  let warnings = 0;
-  let totalPrecip = 0;
-  let precipSites = 0;
-  for (const s of sites) {
-    const sev = siteSeverity(s);
-    if (sev === 'warn' || sev === 'danger' || sev === 'extreme') warnings++;
-    const pred = state.preds?.get(s.id);
-    if (pred?.series) {
-      const totalP = pred.series.reduce((a, p) => a + (p.precip_mm || 0), 0);
-      if (totalP > 0) { totalPrecip += totalP; precipSites++; }
+    if (sev && (sevRank[sev] > (sevRank[worst] || 0))) {
+      worst = sev; worstSite = s;
     }
   }
-  const avgPrecip = precipSites ? totalPrecip / precipSites : 0;
-  document.getElementById('summary').innerHTML = `
-    <div class="stat"><b>${monitored.length}</b>monitored</div>
-    <div class="stat"><b style="color:${warnings ? 'var(--warn)' : 'var(--ok)'}">${warnings}</b>at-risk</div>
-    <div class="stat"><b>${avgPrecip.toFixed(1)}mm</b>avg rain 12h</div>
-  `;
+  const dot = document.getElementById('status-dot');
+  const text = document.getElementById('status-text');
+  const detail = document.getElementById('status-detail');
+  dot.className = 'dot ' + worst;
+  if (worst === 'extreme') { text.textContent = 'Extreme'; detail.innerHTML = `${worstSite.name} above Q10`; }
+  else if (worst === 'danger') { text.textContent = 'Flood Warning'; detail.innerHTML = `${worstSite.name} above Q5`; }
+  else if (worst === 'warn') { text.textContent = 'Watch'; detail.innerHTML = `${worstSite.name} approaching Q2`; }
+  else { text.textContent = 'All Clear'; detail.textContent = ''; }
+
+  const u = state.updated || state.predsUpdated;
+  if (u) {
+    const updated = new Date(u);
+    const minsAgo = Math.round((Date.now() - updated.getTime()) / 60_000);
+    const stamp = minsAgo < 60 ? `${minsAgo}m ago` : `${Math.round(minsAgo/60)}h ago`;
+    detail.innerHTML = (detail.innerHTML ? detail.innerHTML + ' · ' : '') +
+      `<span style="color:var(--paper-soft)">refreshed ${stamp}</span>`;
+  }
 }
 
-// ---- gauge feed -----------------------------------------------------------
+// ---- gauge list (right pane bottom) ---------------------------------------
 
-function renderGaugeList() {
-  const list = document.getElementById('gauge-list');
-  const sites = visibleSites().slice();
-  // Sort: severity desc, then peak forecast desc, then name
-  sites.sort((a, b) => {
-    const sa = sevRank[siteSeverity(a)], sb = sevRank[siteSeverity(b)];
+function renderOtherGauges() {
+  const sites = state.sites.slice().sort((a, b) => {
+    const sa = sevRank[siteSeverity(a)] || -1;
+    const sb = sevRank[siteSeverity(b)] || -1;
     if (sa !== sb) return sb - sa;
-    const fa = forecastPeak(a)?.o ?? -Infinity, fb = forecastPeak(b)?.o ?? -Infinity;
-    if (fa !== fb) return fb - fa;
-    return a.name.localeCompare(b.name);
+    return (a.drain_area_sqmi || 0) > (b.drain_area_sqmi || 0) ? -1 : 1;
   });
+  const list = document.getElementById('other-list');
   list.innerHTML = sites.map(s => {
     const sev = siteSeverity(s);
+    const dot = sev || 'none';
     const now = liveNow(s);
     const peak = forecastPeak(s);
-    const flowNow = now ? fmtFlow(now.o) : '—';
-    const flowPeak = peak ? fmtFlow(peak.o) : '—';
-    const delta = (now && peak) ? peak.o - now.o : 0;
-    const deltaCls = delta > 0.05 ? 'up' : 'down';
-    const deltaTxt = (now && peak)
-      ? (delta > 0 ? '↑ ' : '↓ ') + fmtFlow(Math.abs(delta))
+    const arrow = (now && peak)
+      ? (peak.o > now.o * 1.05 ? '↗' : peak.o < now.o * 0.95 ? '↘' : '→')
       : '';
-    const hours = hoursToThreshold(s, 'warning');
-    const meta = hours != null && hours < 12
-        ? `<b style="color:var(--warn)">warning in ~${Math.round(hours)}h</b>`
-        : (peak ? `peak ${flowPeak} ${unitLabel()}` : `${s.kind || ''}`);
-    const sel = state.selected?.id === s.id ? ' selected' : '';
-    return `<div class="gauge${sel}" data-id="${s.id}">
-      <div class="severity ${sev}"></div>
-      <div class="info">
-        <div class="name">${s.name}</div>
-        <div class="meta">${meta}</div>
-      </div>
-      <div class="flow">
-        <span class="now">${flowNow}</span>
-        <span class="delta ${deltaCls}">${deltaTxt}</span>
-      </div>
+    const nowVal = now ? `${fmtFlow(now.o)}` : '—';
+    const cls = state.selected?.id === s.id ? ' selected' : '';
+    return `<div class="row${cls}" data-id="${s.id}">
+      <span class="dot ${dot}"></span>
+      <span class="name">${s.name}</span>
+      <span class="now">${nowVal} ${unitLabel()}</span>
+      <span class="arrow">${arrow}</span>
     </div>`;
   }).join('');
-  list.querySelectorAll('.gauge').forEach(el => {
-    el.addEventListener('click', () => select(el.dataset.id));
-  });
+  list.querySelectorAll('.row').forEach(el =>
+    el.addEventListener('click', () => select(el.dataset.id)));
 }
 
 function select(gid) {
   const s = state.sites.find(x => x.id === gid);
   if (!s) return;
   if (state.selected) {
-    state.markers.get(state.selected.id)?.getElement()
-      ?.querySelector('.m')?.classList.remove('selected');
+    state.markers.get(state.selected.id)?.getElement()?.querySelector('.m')?.classList.remove('selected');
   }
   state.selected = s;
   state.markers.get(gid)?.getElement()?.querySelector('.m')?.classList.add('selected');
-  // re-render list to highlight
-  renderGaugeList();
-  renderChart(s);
+  renderOtherGauges();
+  renderDetail(s);
 }
 
-// ---- chart ----------------------------------------------------------------
+// ---- detail pane ---------------------------------------------------------
 
-function renderChart(s) {
-  const canvas = document.getElementById('chart');
-  const empty = document.getElementById('chart-empty');
+function renderDetail(s) {
   const pred = state.preds?.get(s.id);
-  const conv = state.unit === 'cfs' ? M3S_TO_CFS : 1;
+  const now = liveNow(s);
+  const peak = forecastPeak(s);
+  const th = s.thresholds;
 
-  document.getElementById('chart-site').textContent = s.name;
+  // Header card
+  document.getElementById('gauge-id').textContent = `USGS ${s.id}`;
+  document.getElementById('gauge-name').textContent = s.name;
+  const metaParts = [];
+  if (s.drain_area_sqmi) metaParts.push(`${s.drain_area_sqmi.toLocaleString()} mi² drainage`);
+  if (s.state) metaParts.push(s.state);
+  if (s.kind) metaParts.push(s.kind);
+  document.getElementById('gauge-meta').textContent = metaParts.join(' · ');
 
-  if (!pred?.series?.length && !pred?.backtest?.length) {
+  // Big numbers
+  document.getElementById('now-val').innerHTML = now
+    ? `${fmtFlow(now.o)} <span class="unit">${unitLabel()}</span>`
+    : `— <span class="unit">${unitLabel()}</span>`;
+  document.getElementById('peak-val').innerHTML = peak
+    ? `${fmtFlow(peak.o)} <span class="unit">${unitLabel()}</span>`
+    : `— <span class="unit">${unitLabel()}</span>`;
+  const deltaEl = document.getElementById('delta');
+  if (now && peak) {
+    const d = peak.o - now.o;
+    const pct = (d / Math.max(now.o, 0.001)) * 100;
+    const cls = d > now.o * 0.05 ? 'up' : d < -now.o * 0.05 ? 'down' : '';
+    const direction = d > 0 ? 'rising' : d < 0 ? 'falling' : 'steady';
+    deltaEl.className = 'delta ' + cls;
+    deltaEl.innerHTML = `<b>${direction}</b> · ${pct >= 0 ? '+' : ''}${pct.toFixed(0)}% over the next 12h`;
+  } else {
+    deltaEl.className = 'delta';
+    deltaEl.innerHTML = 'trend pending';
+  }
+
+  renderThresholdBar(th, now?.o);
+  renderModelCard(s, pred);
+  renderPrecip(s, pred);
+  renderChart(s, pred);
+}
+
+function renderThresholdBar(th, nowFlow) {
+  const wrap = document.getElementById('bar-wrap');
+  const pct = document.getElementById('pct-warning');
+  if (!th) {
+    wrap.innerHTML = `<div style="color:var(--paper-soft);font:11px var(--mono)">no historical thresholds</div>`;
+    pct.textContent = '—';
+    return;
+  }
+  pct.textContent = nowFlow != null
+    ? `${(nowFlow / th.warning * 100).toFixed(0)}% of Q2`
+    : '—';
+  const stops = { warning: 33, danger: 60, extreme: 85, max: 100 };
+  function pctPos(v) {
+    if (v <= th.warning) return (v / th.warning) * stops.warning;
+    if (v <= th.danger)  return stops.warning + ((v - th.warning) / (th.danger - th.warning)) * (stops.danger - stops.warning);
+    if (v <= th.extreme) return stops.danger + ((v - th.danger) / (th.extreme - th.danger)) * (stops.extreme - stops.danger);
+    return Math.min(99, stops.extreme + ((v - th.extreme) / Math.max(0.001, th.max_observed - th.extreme)) * (stops.max - stops.extreme));
+  }
+  wrap.innerHTML = `
+    <div class="bar-tick" style="left:${stops.warning}%">
+      <b>${fmtFlow(th.warning)}</b><br>Q2 warning</div>
+    <div class="bar-tick" style="left:${stops.danger}%">
+      <b>${fmtFlow(th.danger)}</b><br>Q5 danger</div>
+    <div class="bar-tick" style="left:${stops.extreme}%">
+      <b>${fmtFlow(th.extreme)}</b><br>Q10 extreme</div>
+    <div class="bar-segs">
+      <div class="seg-ok"      style="width:${stops.warning}%"></div>
+      <div class="seg-warn"    style="width:${stops.danger - stops.warning}%"></div>
+      <div class="seg-danger"  style="width:${stops.extreme - stops.danger}%"></div>
+      <div class="seg-extreme" style="width:${stops.max - stops.extreme}%"></div>
+    </div>
+    ${nowFlow != null ? `<div class="bar-cursor" style="left:${pctPos(nowFlow)}%"></div>` : ''}
+  `;
+}
+
+function renderModelCard(s, pred) {
+  const btNSE = backtestNSE(s);
+  const testNSE = pred?.metrics?.nse_overall;
+  document.getElementById('model-bt-nse').innerHTML =
+    btNSE != null ? `<b>${btNSE.toFixed(2)}</b> NSE / last 30 days` : `<b>—</b> NSE / last 30 days`;
+  document.getElementById('model-test-nse').innerHTML =
+    testNSE != null ? `<b>${testNSE.toFixed(2)}</b> held-out 15% of 3yr` : `<b>—</b> held-out 15% of 3yr`;
+  const updated = pred?.issue_time;
+  document.getElementById('model-updated').textContent = updated
+    ? FMT_FULL.format(new Date(updated)) + ' UTC'
+    : '—';
+}
+
+function renderPrecip(s, pred) {
+  const canvas = document.getElementById('precip-bars');
+  const empty = document.getElementById('precip-empty');
+  const totalEl = document.getElementById('precip-total');
+  const fcPrecip = (pred?.series || []).filter(p => p.precip_mm != null && p.p != null);
+  if (!fcPrecip.length) {
     canvas.style.display = 'none';
     empty.style.display = 'block';
-    empty.innerHTML = `No predictions available for ${s.name} yet.`;
+    totalEl.textContent = '';
+    if (state.precipChart) { state.precipChart.destroy(); state.precipChart = null; }
+    return;
+  }
+  canvas.style.display = 'block';
+  empty.style.display = 'none';
+  const total = fcPrecip.reduce((a, p) => a + p.precip_mm, 0);
+  totalEl.textContent = `${total.toFixed(1)} mm`;
+  if (state.precipChart) state.precipChart.destroy();
+  state.precipChart = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels: fcPrecip.map(p => p.d),
+      datasets: [{
+        data: fcPrecip.map(p => p.precip_mm),
+        backgroundColor: 'rgba(136, 152, 193, 0.7)',
+        borderColor: 'rgba(136, 152, 193, 1)',
+        borderWidth: 1, barThickness: 6,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: { legend: { display: false },
+                  tooltip: { backgroundColor: '#161d28', borderColor: '#2a3242', borderWidth: 1,
+                              titleColor: '#ede8de', bodyColor: '#ede8de', padding: 7,
+                              callbacks: {
+                                title: items => FMT_FULL.format(new Date(items[0].label)),
+                                label: ctx => `${ctx.parsed.y.toFixed(1)} mm/h`,
+                              } } },
+      scales: {
+        x: { type: 'time', time: { unit: 'hour', displayFormats: { hour: 'ha' } },
+             ticks: { color: '#6e6a5e', font: { size: 9, family: 'ui-monospace' }, maxRotation: 0 },
+             grid: { display: false } },
+        y: { ticks: { color: '#6e6a5e', font: { size: 9, family: 'ui-monospace' },
+                       callback: v => `${v}mm` },
+              grid: { color: 'rgba(42,50,66,0.5)' }, beginAtZero: true },
+      },
+    },
+  });
+}
+
+// ---- main chart -----------------------------------------------------------
+
+function renderChart(s, pred) {
+  const canvas = document.getElementById('chart');
+  const conv = state.unit === 'cfs' ? M3S_TO_CFS : 1;
+
+  if (!pred?.series?.length && !pred?.backtest?.length) {
     if (state.chart) { state.chart.destroy(); state.chart = null; }
-    renderChartStats(s, [], []);
     return;
   }
 
-  // Chart x-axis spans the backtest start (7 days back) → forecast horizon
-  // (issue + 12h). Hourly tick density, daily-formatted ticks for legibility.
   const backtest = pred.backtest ?? [];
   const series = pred.series ?? [];
   const xMin = backtest.length ? backtest[0].t : series[0].d;
   const xMax = series.length ? series[series.length - 1].d : backtest[backtest.length - 1].t;
-  const todayISO = pred.issue_time;
+  const issueISO = pred.issue_time;
 
-  // Observed: backtest's hourly observed + the 24h obs at the end (in series).
   const obsData = backtest
     .filter(b => b.o != null).map(b => ({ x: b.t, y: b.o * conv }))
     .concat(series.filter(p => p.o != null).map(p => ({ x: p.d, y: p.o * conv })));
-
-  // Backtest nowcast: 1h-ahead at each historical hour (dashed orange).
-  const backtestPred = backtest.map(b => ({ x: b.t, y: b.p1 * conv }));
-
-  // Live forecast: solid orange going forward into the 12h horizon.
-  const liveForecast = series
-    .filter(p => p.p != null).map(p => ({ x: p.d, y: p.p * conv }));
-
-  // Hourly precip bars across the whole window (CNN bundles precip_mm in series).
-  const precipBars = series.filter(p => p.precip_mm != null)
-    .map(p => ({ x: p.d, y: p.precip_mm }));
-
-  renderChartStats(s, liveForecast, backtestPred);
-
-  canvas.style.display = 'block';
-  empty.style.display = 'none';
-  canvas.style.display = 'block';
-  empty.style.display = 'none';
+  const backtestPred = backtest.filter(b => b.p1 != null).map(b => ({ x: b.t, y: b.p1 * conv }));
+  const liveForecast = series.filter(p => p.p != null).map(p => ({ x: p.d, y: p.p * conv }));
 
   const thresholdLines = !s.thresholds ? [] : [
-    { y: s.thresholds.warning * conv, color: 'rgba(250,204,21,0.6)', label: `Q2 warning` },
-    { y: s.thresholds.danger  * conv, color: 'rgba(249,115,22,0.6)', label: `Q5 danger` },
-    { y: s.thresholds.extreme * conv, color: 'rgba(239,68,68,0.6)',  label: `Q10 extreme` },
+    { y: s.thresholds.warning * conv, color: 'rgba(216,169,63,0.55)', label: 'Q2' },
+    { y: s.thresholds.danger  * conv, color: 'rgba(200,117,68,0.55)', label: 'Q5' },
+    { y: s.thresholds.extreme * conv, color: 'rgba(177,69,51,0.6)',  label: 'Q10' },
   ];
 
   const datasets = [];
   if (obsData.length) datasets.push({
-    label: 'Observed (USGS)', data: obsData, borderColor: '#22c55e',
-    backgroundColor: 'rgba(34,197,94,0.10)', borderWidth: 2, pointRadius: 0,
+    label: 'Observed', data: obsData, borderColor: '#5fa3d6',
+    backgroundColor: 'rgba(95,163,214,0.10)', borderWidth: 1.6, pointRadius: 0,
     tension: 0.1, fill: true,
   });
   if (backtestPred.length) datasets.push({
-    label: 'Model nowcast (1h-ahead, past week)', data: backtestPred,
-    borderColor: '#f97316', backgroundColor: 'transparent',
-    borderWidth: 1.4, pointRadius: 0, tension: 0.1, borderDash: [3, 3],
+    label: 'Model nowcast (1h-ahead)', data: backtestPred,
+    borderColor: 'rgba(216,169,63,0.85)', backgroundColor: 'transparent',
+    borderWidth: 1.2, pointRadius: 0, tension: 0.1, borderDash: [3, 3],
   });
   if (liveForecast.length) datasets.push({
-    label: 'Forecast 12h', data: liveForecast, borderColor: '#f97316',
-    backgroundColor: 'transparent', borderWidth: 2.5, pointRadius: 2.5,
-    pointBackgroundColor: '#f97316', tension: 0.1,
-  });
-  if (precipBars.length) datasets.push({
-    label: 'Precip mm/h', data: precipBars, type: 'bar',
-    backgroundColor: 'rgba(129,140,248,0.55)', borderColor: 'rgba(129,140,248,1)',
-    borderWidth: 1, borderRadius: 2, yAxisID: 'yPrecip',
-    barThickness: 3,
+    label: '12h forecast', data: liveForecast, borderColor: '#d8a93f',
+    backgroundColor: 'transparent', borderWidth: 2.5, pointRadius: 2.2,
+    pointBackgroundColor: '#d8a93f', tension: 0.1,
   });
 
   if (state.chart) state.chart.destroy();
@@ -441,60 +483,53 @@ function renderChart(s) {
       responsive: true, maintainAspectRatio: false, animation: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: {
-          display: true, position: 'top', align: 'end',
-          labels: { color: '#8b96a4', font: { size: 10 }, boxWidth: 10, boxHeight: 2 },
-        },
+        legend: { display: false },
         tooltip: {
-          backgroundColor: '#11161e', borderColor: '#364253', borderWidth: 1,
-          titleColor: '#e6edf3', bodyColor: '#e6edf3', padding: 8,
+          backgroundColor: '#161d28', borderColor: '#2a3242', borderWidth: 1,
+          titleColor: '#ede8de', bodyColor: '#ede8de', padding: 8,
+          titleFont: { family: 'ui-monospace', size: 10 },
+          bodyFont:  { family: 'ui-monospace', size: 11 },
           callbacks: {
-            label: (ctx) => ctx.dataset.yAxisID === 'yPrecip'
-              ? `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)} mm`
-              : `${ctx.dataset.label}: ${fmtFlow(ctx.parsed.y)} ${unitLabel()}`,
-            title: (items) => FMT_FULL.format(new Date(items[0].parsed.x)),
+            label: ctx => `${ctx.dataset.label}: ${fmtFlow(ctx.parsed.y)} ${unitLabel()}`,
+            title: items => FMT_FULL.format(new Date(items[0].parsed.x)),
           },
         },
-        thresholdLines: { lines: thresholdLines, forecastBand: { from: todayISO, to: xMax } },
+        thresholdLines: { lines: thresholdLines, issueISO, xMax },
       },
       scales: {
         x: { type: 'time', min: xMin, max: xMax,
              time: { unit: 'day', displayFormats: { day: 'MMM d', hour: 'ha' },
                      tooltipFormat: 'MMM d, h:mma' },
-             ticks: { color: '#8b96a4', maxRotation: 0, font: { size: 9 } },
-             grid: { color: 'rgba(255,255,255,0.04)' } },
-        y: { ticks: { color: '#8b96a4', font: { size: 9 }, callback: v => fmtFlow(v) },
-             grid: { color: 'rgba(255,255,255,0.04)' },
-             title: { display: true, text: unitLabel(), color: '#8b96a4', font: { size: 10 } } },
-        yPrecip: {
-          display: !!datasets.find(d => d.yAxisID === 'yPrecip'),
-          position: 'right',
-          grid: { drawOnChartArea: false },
-          ticks: { color: 'rgba(129,140,248,0.7)', font: { size: 9 }, callback: v => `${v}mm` },
-          title: { display: true, text: 'precip', color: 'rgba(129,140,248,0.7)', font: { size: 9 } },
-          beginAtZero: true,
-        },
+             ticks: { color: '#6e6a5e', maxRotation: 0,
+                       font: { family: 'ui-monospace', size: 10 } },
+             grid: { color: 'rgba(42,50,66,0.45)' } },
+        y: { ticks: { color: '#6e6a5e', font: { family: 'ui-monospace', size: 10 },
+                       callback: v => fmtFlow(v) },
+              grid: { color: 'rgba(42,50,66,0.45)' },
+              title: { display: true, text: unitLabel(), color: '#6e6a5e',
+                        font: { family: 'ui-monospace', size: 10 } } },
       },
     },
     plugins: [{
       id: 'thresholdLines',
       beforeDraw(chart, _, opts) {
         const lines = opts?.lines ?? [];
-        const band = opts?.forecastBand;
         const { ctx, chartArea: a, scales: { x, y } } = chart;
         if (!a) return;
-        if (band) {
-          const x1 = x.getPixelForValue(new Date(band.from).getTime());
-          const x2 = x.getPixelForValue(new Date(band.to).getTime());
+        // Forecast band shading
+        if (opts?.issueISO && opts?.xMax) {
+          const x1 = x.getPixelForValue(new Date(opts.issueISO).getTime());
+          const x2 = x.getPixelForValue(new Date(opts.xMax).getTime());
           ctx.save();
-          ctx.fillStyle = 'rgba(249,115,22,0.05)';
+          ctx.fillStyle = 'rgba(216,169,63,0.06)';
           ctx.fillRect(x1, a.top, x2 - x1, a.bottom - a.top);
-          ctx.strokeStyle = 'rgba(249,115,22,0.4)';
-          ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
+          ctx.strokeStyle = 'rgba(216,169,63,0.4)';
+          ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
           ctx.beginPath(); ctx.moveTo(x1, a.top); ctx.lineTo(x1, a.bottom); ctx.stroke();
           ctx.setLineDash([]);
-          ctx.fillStyle = 'rgba(249,115,22,0.85)'; ctx.font = '10px sans-serif';
-          ctx.fillText('FORECAST', x1 + 6, a.top + 12);
+          ctx.fillStyle = 'rgba(216,169,63,0.85)';
+          ctx.font = '9px ui-monospace, monospace';
+          ctx.fillText('FORECAST', x1 + 5, a.top + 11);
           ctx.restore();
         }
         ctx.save();
@@ -505,52 +540,11 @@ function renderChart(s) {
           ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
           ctx.beginPath(); ctx.moveTo(a.left, yPx); ctx.lineTo(a.right, yPx); ctx.stroke();
           ctx.setLineDash([]);
-          ctx.fillStyle = ln.color; ctx.font = '10px sans-serif';
-          ctx.fillText(ln.label, a.left + 6, yPx - 3);
+          ctx.fillStyle = ln.color; ctx.font = '9px ui-monospace, monospace';
+          ctx.fillText(ln.label, a.left + 4, yPx - 2);
         }
         ctx.restore();
       },
     }],
   });
-}
-
-function renderChartStats(s, liveForecast, backtestPred) {
-  const el = document.getElementById('chart-stats');
-  const now = liveNow(s);
-  const peak = forecastPeak(s);
-  const sev = siteSeverity(s);
-  const th = s.thresholds;
-  const peakRatio = (peak && th) ? (peak.o / th.warning * 100) : null;
-
-  // Compute backtest NSE if we have it (model nowcast vs observed)
-  const pred = state.preds?.get(s.id);
-  let backtestNSE = null;
-  if (pred?.backtest?.length) {
-    const paired = pred.backtest.filter(b => b.o != null);
-    if (paired.length > 10) {
-      const obs = paired.map(b => b.o);
-      const sim = paired.map(b => b.p1);
-      const mean = obs.reduce((a, c) => a + c, 0) / obs.length;
-      const ss = obs.reduce((a, o, i) => a + (o - sim[i]) ** 2, 0);
-      const st = obs.reduce((a, o) => a + (o - mean) ** 2, 0);
-      backtestNSE = 1 - ss / (st + 1e-9);
-    }
-  }
-
-  const parts = [];
-  if (now) parts.push(`<span>now <b>${fmtFlow(now.o)} ${unitLabel()}</b></span>`);
-  if (peak) {
-    const cls = sev !== 'ok' && sev !== 'untrained' ? ` class="${sev}"` : '';
-    parts.push(`<span${cls}>peak 12h <b>${fmtFlow(peak.o)} ${unitLabel()}</b></span>`);
-  }
-  if (peakRatio != null) {
-    parts.push(`<span>vs warning <b>${peakRatio.toFixed(0)}%</b></span>`);
-  }
-  if (backtestNSE != null) {
-    parts.push(`<span>7d NSE <b>${backtestNSE.toFixed(3)}</b></span>`);
-  }
-  if (s.drain_area_sqmi) {
-    parts.push(`<span>drainage <b>${s.drain_area_sqmi.toLocaleString()} mi²</b></span>`);
-  }
-  el.innerHTML = parts.join('');
 }
