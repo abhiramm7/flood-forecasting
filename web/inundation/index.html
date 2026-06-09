@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DC Flood Sim — DMV Flood Watch</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.css"
+      crossorigin>
+<style>
+  :root {
+    --ink:        #0c1018;
+    --paper:      #ede8de;
+    --paper-dim:  #a39d8e;
+    --paper-soft: #6e6a5e;
+    --surface:    #161d28;
+    --rule:       #2a3242;
+    --accent:     #d8a93f;
+    --water:      #2e6a8c;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
+    --serif: ui-serif, "New York", "Iowan Old Style", "Charter", serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--ink);
+    color: var(--paper); font: 13px/1.45 -apple-system, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased; overflow: hidden; }
+  a { color: var(--accent); text-decoration: none; }
+
+  #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: #060a0f; }
+  .maplibregl-ctrl-attrib-inner { background: rgba(12,16,24,0.6) !important;
+    color: var(--paper-soft) !important; font: 10px var(--mono); }
+  .maplibregl-ctrl-attrib a { color: var(--paper-soft) !important; }
+
+  /* Masthead */
+  header {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 5;
+    padding: 14px 22px 12px;
+    background: linear-gradient(to bottom, rgba(12,16,24,0.95), rgba(12,16,24,0));
+    display: flex; align-items: baseline; gap: 18px;
+  }
+  header h1 {
+    margin: 0; font-family: var(--serif); font-weight: 600; font-size: 19px;
+    letter-spacing: -0.015em; color: var(--paper);
+  }
+  header .deck { color: var(--paper-dim); font-size: 12px; }
+  header .deck a { color: var(--paper-dim); text-decoration: underline dotted; }
+  header .deck a:hover { color: var(--paper); }
+
+  /* Flood-level control */
+  .panel {
+    position: absolute; left: 22px; bottom: 22px; z-index: 5;
+    background: rgba(12,16,24,0.85); backdrop-filter: blur(10px);
+    border: 1px solid var(--rule); border-radius: 4px;
+    padding: 14px 18px 12px; min-width: 340px;
+  }
+  .panel .kicker {
+    font: 9.5px var(--mono); color: var(--paper-soft);
+    letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 6px;
+  }
+  .panel .val {
+    font-family: var(--mono); font-size: 28px; line-height: 1; color: var(--paper);
+    font-variant-numeric: tabular-nums; font-weight: 500;
+  }
+  .panel .val .unit { font-size: 12px; color: var(--paper-soft); margin-left: 6px; }
+  .panel .val .ft { font-size: 11px; color: var(--paper-soft); margin-left: 10px; }
+
+  .slider { margin-top: 14px; }
+  .slider input[type=range] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 4px; background: var(--rule); border-radius: 2px;
+    outline: none; margin: 0;
+  }
+  .slider input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--accent); cursor: pointer;
+    border: 2px solid var(--ink); box-shadow: 0 0 6px rgba(216,169,63,0.6);
+  }
+  .slider input[type=range]::-moz-range-thumb {
+    width: 16px; height: 16px; border-radius: 50%; background: var(--accent);
+    cursor: pointer; border: 2px solid var(--ink);
+  }
+  .slider .scale {
+    display: flex; justify-content: space-between; margin-top: 6px;
+    font: 9px var(--mono); color: var(--paper-soft);
+  }
+
+  .presets { display: flex; gap: 4px; margin-top: 12px; flex-wrap: wrap; }
+  .presets button {
+    background: transparent; border: 1px solid var(--rule); color: var(--paper-soft);
+    padding: 4px 9px; font: 10px var(--mono); cursor: pointer;
+    border-radius: 2px; letter-spacing: 0.04em;
+  }
+  .presets button:hover { color: var(--paper); border-color: var(--paper-soft); }
+  .presets button.on { background: var(--accent); color: var(--ink); border-color: var(--accent); }
+
+  .ctrl-row {
+    display: flex; gap: 14px; align-items: center;
+    margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--rule);
+    font: 10px var(--mono); color: var(--paper-soft);
+  }
+  .ctrl-row label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .ctrl-row input[type=checkbox] { accent-color: var(--accent); }
+
+  /* Gauge markers */
+  .gauge-marker {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: #6b9c5b; border: 2px solid var(--ink);
+    box-shadow: 0 0 0 1px rgba(237,232,222,0.18);
+    cursor: pointer;
+  }
+  .gauge-marker.flooded { background: var(--water); animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+  .footnote {
+    position: absolute; right: 22px; bottom: 22px; z-index: 5;
+    font: 9.5px var(--mono); color: var(--paper-soft);
+    letter-spacing: 0.04em; max-width: 280px; text-align: right;
+    background: rgba(12,16,24,0.7); padding: 6px 10px; border-radius: 2px;
+    border: 1px solid var(--rule);
+  }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<header>
+  <h1>DC Flood Sim</h1>
+  <span class="deck">
+    raise the water level to see what floods · DSM-based 3D ·
+    <a href="../">← back to flood watch</a>
+  </span>
+</header>
+
+<div class="panel">
+  <div class="kicker">Water surface elevation</div>
+  <div class="val">
+    <span id="level-m">5.0</span><span class="unit">m</span>
+    <span class="ft" id="level-ft">16.4 ft</span>
+  </div>
+  <div class="slider">
+    <input type="range" id="slider" min="0" max="20" step="0.1" value="5">
+    <div class="scale">
+      <span>0 m / sea level</span>
+      <span>10 m</span>
+      <span>20 m</span>
+    </div>
+  </div>
+  <div class="presets" id="presets">
+    <!-- Populated from JS with the 4 NWS flood stages from sites.json -->
+  </div>
+  <div class="ctrl-row">
+    <label><input type="checkbox" id="toggle-buildings" checked>show buildings</label>
+    <label><input type="checkbox" id="toggle-gauges" checked>show gauges</label>
+    <label>exag <input type="range" id="exag" min="1" max="3" step="0.1" value="1.5" style="width:50px"></label>
+  </div>
+</div>
+
+<div class="footnote">
+  Terrain: <a href="https://opendata.dc.gov/" style="color:inherit">OpenData DC LiDAR DSM 2020</a> (1 m, resampled to 3 m)<br>
+  Inundation: bathtub at constant elevation — coarse but illustrative.
+  Buildings appear as DSM bumps because lidar saw them.
+</div>
+
+<script src="https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.js" crossorigin></script>
+<script>
+const DC_CENTER = [-77.025, 38.89];
+const DC_BBOX = [[-77.13, 38.78], [-76.91, 38.78], [-76.91, 39.0], [-77.13, 39.0], [-77.13, 38.78]];
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: {
+    version: 8,
+    glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+    sources: {
+      basemap: {
+        type: 'raster',
+        tiles: ['https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+                'https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+                'https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+                'https://d.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'],
+        tileSize: 256,
+        attribution: '© OpenStreetMap © CARTO',
+      },
+      'dc-dem': {
+        type: 'raster-dem',
+        tiles: [location.origin + location.pathname.replace(/[^/]*$/, '') + 'terrain/{z}/{x}/{y}.png'],
+        tileSize: 256,
+        encoding: 'mapbox',
+        maxzoom: 15,
+      },
+      water: {
+        type: 'geojson',
+        data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [DC_BBOX] } },
+      },
+    },
+    layers: [
+      { id: 'basemap', type: 'raster', source: 'basemap' },
+      // Water layer is added in map.on('load') below.
+    ],
+    terrain: { source: 'dc-dem', exaggeration: 1.5 },
+    sky: { 'sky-color': '#0c1018', 'horizon-color': '#1a2330', 'fog-color': '#0c1018', 'fog-ground-blend': 0.6 },
+  },
+  center: DC_CENTER, zoom: 11.5, pitch: 65, bearing: -15,
+  maxPitch: 80,
+  hash: true,
+});
+map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
+
+let waterLevel = 5.0;
+
+function updateLevel(v) {
+  waterLevel = v;
+  document.getElementById('level-m').textContent = v.toFixed(1);
+  document.getElementById('level-ft').textContent = (v / 0.3048).toFixed(1) + ' ft';
+  if (map.getLayer('water-fill')) {
+    map.setPaintProperty('water-fill', 'fill-extrusion-base', Math.max(0, v - 0.05));
+    map.setPaintProperty('water-fill', 'fill-extrusion-height', v);
+  }
+  // Update marker styling
+  for (const g of GAUGES) {
+    if (!g.marker) continue;
+    const el = g.marker.getElement();
+    const dot = el.querySelector('.gauge-marker');
+    if (!dot) continue;
+    // crude: lookup elevation from a sampled DSM map (we don't have one
+    // client-side); use approximate elevations from the prepare step
+    dot.classList.toggle('flooded', g.elev != null && g.elev <= waterLevel);
+  }
+}
+
+document.getElementById('slider').addEventListener('input', e => {
+  updateLevel(parseFloat(e.target.value));
+});
+document.getElementById('exag').addEventListener('input', e => {
+  map.setTerrain({ source: 'dc-dem', exaggeration: parseFloat(e.target.value) });
+});
+document.getElementById('toggle-gauges').addEventListener('change', e => {
+  for (const g of GAUGES) {
+    if (g.marker) g.marker.getElement().style.display = e.target.checked ? '' : 'none';
+  }
+});
+document.getElementById('toggle-buildings').addEventListener('change', e => {
+  // "Buildings" here = the DSM bumps. Toggle via exaggeration.
+  map.setTerrain({ source: 'dc-dem', exaggeration: e.target.checked ? parseFloat(document.getElementById('exag').value) : 0 });
+});
+
+// Sample elevations measured during the prepare_terrain run, in EPSG:3857.
+// Used to color gauge markers as "above" or "below" the slider's water level.
+const GAUGES = [
+  { id: '01646500', name: 'Potomac at Little Falls', lat: 38.9498, lon: -77.1276, elev: 6 },
+  { id: '01648000', name: 'Rock Creek at Sherrill Dr', lat: 38.9725, lon: -77.04, elev: 60 },
+  { id: '01651760', name: 'Anacostia at Kenilworth',  lat: 38.9092, lon: -76.9553, elev: 9 },
+  { id: '01649500', name: 'NE Branch Anacostia',      lat: 38.9603, lon: -76.926,  elev: null },
+  { id: '01650500', name: 'NW Branch Anacostia',      lat: 39.0655, lon: -77.0294, elev: null },
+  { id: '01651800', name: 'Watts Branch DC',          lat: 38.9013, lon: -76.9433, elev: 8.4 },
+  { id: '01646000', name: 'Difficult Run',            lat: 38.9759, lon: -77.2458, elev: null },
+];
+
+map.on('load', () => {
+  // Water layer — a giant polygon over the bbox. fill-extrusion creates
+  // a flat slab at the slider's elevation. The 3D terrain (DSM) naturally
+  // occludes where it pokes above the slab — gives the "DC floods up to
+  // X meters" effect for free, no per-stage polygons needed.
+  map.addLayer({
+    id: 'water-fill',
+    type: 'fill-extrusion',
+    source: 'water',
+    paint: {
+      'fill-extrusion-color': '#2e6a8c',
+      'fill-extrusion-opacity': 0.72,
+      'fill-extrusion-base': waterLevel - 0.05,
+      'fill-extrusion-height': waterLevel,
+    },
+  });
+  updateLevel(waterLevel);
+
+  // Gauge markers
+  for (const g of GAUGES) {
+    const el = document.createElement('div');
+    const dot = document.createElement('div');
+    dot.className = 'gauge-marker';
+    dot.title = `${g.name} · ${g.id}`;
+    el.appendChild(dot);
+    g.marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
+      .setLngLat([g.lon, g.lat])
+      .setPopup(new maplibregl.Popup({ offset: 10 })
+        .setHTML(`<strong>${g.name}</strong><br>USGS ${g.id}<br>` +
+                 (g.elev != null ? `DSM elev ${g.elev.toFixed(1)} m` : 'outside DC DSM extent')))
+      .addTo(map);
+  }
+
+  // Preset buttons — common river-flood thresholds for DC's rivers
+  const presets = [
+    { label: '2 m  · river dry season',  v: 2 },
+    { label: '5 m  · normal river',      v: 5 },
+    { label: '9 m  · Watts Br action',   v: 9 },
+    { label: '12 m · Anacostia minor',   v: 12 },
+    { label: '18 m · Anacostia major',   v: 18 },
+  ];
+  const wrap = document.getElementById('presets');
+  for (const p of presets) {
+    const b = document.createElement('button');
+    b.textContent = p.label;
+    b.addEventListener('click', () => {
+      document.getElementById('slider').value = p.v;
+      updateLevel(p.v);
+      wrap.querySelectorAll('button').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+    });
+    wrap.appendChild(b);
+  }
+});
+
+// Smooth opening fly-in for drama
+map.on('load', () => {
+  setTimeout(() => {
+    map.easeTo({ center: DC_CENTER, zoom: 12.5, pitch: 65, bearing: -25, duration: 4000 });
+  }, 400);
+});
+</script>
+
+</body>
+</html>
