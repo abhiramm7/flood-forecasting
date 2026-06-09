@@ -212,13 +212,30 @@
 
   /* ─── CHART PANE (bottom-left) ─── */
   #chart-pane .head {
-    display: flex; justify-content: space-between; align-items: baseline;
-    border-bottom: 1px solid var(--rule); padding-bottom: 6px;
+    display: flex; justify-content: space-between; align-items: center;
+    border-bottom: 1px solid var(--rule); padding-bottom: 6px; gap: 14px;
   }
   #chart-pane .head .title {
     font: 10px var(--mono); color: var(--paper-soft);
     letter-spacing: 0.1em; text-transform: uppercase;
   }
+  #chart-pane .head .range {
+    display: flex; margin-left: auto;
+  }
+  #chart-pane .head .range button {
+    background: transparent; border: 1px solid var(--rule);
+    color: var(--paper-soft); padding: 3px 9px;
+    font: 9.5px var(--mono); letter-spacing: 0.05em;
+    text-transform: uppercase; cursor: pointer;
+    border-radius: 0;
+  }
+  #chart-pane .head .range button:not(:last-child) { border-right: none; }
+  #chart-pane .head .range button:first-child { border-radius: 2px 0 0 2px; }
+  #chart-pane .head .range button:last-child  { border-radius: 0 2px 2px 0; }
+  #chart-pane .head .range button.on {
+    background: var(--paper); color: var(--ink); border-color: var(--paper);
+  }
+  #chart-pane .head .range button:hover:not(.on) { color: var(--paper); border-color: var(--paper-soft); }
   #chart-pane .head .legend {
     font: 10px var(--mono); color: var(--paper-soft); display: flex; gap: 14px;
   }
@@ -351,11 +368,18 @@
   <section id="flow">
     <div id="chart-pane">
       <div class="head">
-        <span class="title">Streamflow · last 30 days observed + 12h forecast</span>
+        <span class="title">Streamflow</span>
+        <span class="range" id="range-toggle">
+          <button data-range="24h">24h</button>
+          <button data-range="3d">3d</button>
+          <button data-range="7d">7d</button>
+          <button data-range="30d" class="on">30d</button>
+          <button data-range="all">all</button>
+        </span>
         <span class="legend">
           <span><i class="obs"></i> observed</span>
-          <span><i class="now"></i> model nowcast</span>
-          <span><i class="fc"></i> 12h forecast</span>
+          <span><i class="now"></i> nowcast</span>
+          <span><i class="fc"></i> forecast</span>
         </span>
       </div>
       <div class="chart-wrap"><canvas id="chart"></canvas></div>

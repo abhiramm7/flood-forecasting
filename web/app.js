@@ -22,10 +22,13 @@ const FMT_REL = new Intl.RelativeTimeFormat('en-US', { numeric: 'auto' });
 const M3S_TO_CFS = 35.3147;
 const HOUR_MS = 3600_000;
 
+const RANGE_HOURS = { '24h': 24, '3d': 72, '7d': 168, '30d': 720, 'all': null };
+
 const state = {
   sites: null,
   preds: null,            // gauge id -> {issue_time, series, backtest, metrics}
   unit: 'm3s',
+  chartRange: '30d',      // 24h | 3d | 7d | 30d | all
   selected: null,
   map: null,
   radarLayer: null,
@@ -122,6 +125,16 @@ function backtestNSE(s) {
       renderOtherGauges();
     });
     document.getElementById('radar-toggle').addEventListener('click', toggleRadar);
+
+    // Chart time-range toggle. Changes only re-render the streamflow chart,
+    // leaving everything else (numbers, threshold bar, model card) intact.
+    document.getElementById('range-toggle').addEventListener('click', e => {
+      if (e.target.tagName !== 'BUTTON') return;
+      state.chartRange = e.target.dataset.range;
+      document.querySelectorAll('#range-toggle button').forEach(b =>
+        b.classList.toggle('on', b.dataset.range === state.chartRange));
+      if (state.selected) renderChart(state.selected, state.preds?.get(state.selected.id));
+    });
 
     setupMap();
     await loadPredictions();
@@ -442,9 +455,21 @@ function renderChart(s, pred) {
 
   const backtest = pred.backtest ?? [];
   const series = pred.series ?? [];
-  const xMin = backtest.length ? backtest[0].t : series[0].d;
-  const xMax = series.length ? series[series.length - 1].d : backtest[backtest.length - 1].t;
+  const dataMin = backtest.length ? backtest[0].t : series[0].d;
+  const dataMax = series.length ? series[series.length - 1].d : backtest[backtest.length - 1].t;
   const issueISO = pred.issue_time;
+
+  // Window = back N hours from the issue time. "all" defaults to the full
+  // 30-day backtest. The forecast horizon (+12h after issue) is always
+  // included so the user can see what the model is currently predicting.
+  const hours = RANGE_HOURS[state.chartRange];
+  const issueT = issueISO ? new Date(issueISO).getTime() : new Date(dataMax).getTime();
+  const xMin = hours == null
+    ? dataMin
+    : new Date(Math.max(new Date(dataMin).getTime(), issueT - hours * HOUR_MS)).toISOString();
+  const xMax = dataMax;
+  // Tighter axis ticks for short windows
+  const timeUnit = (state.chartRange === '24h' || state.chartRange === '3d') ? 'hour' : 'day';
 
   const obsData = backtest
     .filter(b => b.o != null).map(b => ({ x: b.t, y: b.o * conv }))
@@ -498,7 +523,8 @@ function renderChart(s, pred) {
       },
       scales: {
         x: { type: 'time', min: xMin, max: xMax,
-             time: { unit: 'day', displayFormats: { day: 'MMM d', hour: 'ha' },
+             time: { unit: timeUnit,
+                     displayFormats: { hour: 'ha', day: 'MMM d' },
                      tooltipFormat: 'MMM d, h:mma' },
              ticks: { color: '#6e6a5e', maxRotation: 0,
                        font: { family: 'ui-monospace', size: 10 } },
