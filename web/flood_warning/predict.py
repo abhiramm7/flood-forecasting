@@ -253,6 +253,22 @@ def run_all():
                 print(f'  {site["id"]} {site["short"]:<16}  +1h={f1["p"]:6.2f}  '
                       f'+12h={f12["p"]:6.2f} m³/s  (issued {p["issue_time"]})')
 
+    # NOAA National Water Model short-range overlay — runs once per gauge,
+    # returns 18 hourly forecast points in m³/s. Bundled into each
+    # prediction record so the UI can draw it alongside our CNN forecast.
+    print('NOAA NWM short-range overlay:')
+    from . import noaa
+    for p in preds:
+        site = BY_ID[p['id']]
+        gauge, nwm = noaa.enrich_site(p['id'])
+        if nwm:
+            p['noaa_nwm'] = nwm
+            first, last = nwm[0]['flow_m3s'], nwm[-1]['flow_m3s']
+            print(f'  {p["id"]} {site["short"]:<16}  '
+                  f'NWM +1h={first:.2f}  +18h={last:.2f} m³/s ({len(nwm)} pts)')
+        else:
+            print(f'  {p["id"]} {site["short"]:<16}  no NWM reach mapped')
+
     OUT_PATH.write_text(json.dumps({
         'model_id': 'dmv-cnn-12h',
         'updated': pd.Timestamp.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),

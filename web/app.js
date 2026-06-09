@@ -340,9 +340,51 @@ function renderDetail(s) {
   }
 
   renderThresholdBar(th, now?.o);
+  renderNwsCard(s);
   renderModelCard(s, pred);
   renderPrecip(s, pred);
   renderChart(s, pred);
+}
+
+function renderNwsCard(s) {
+  const card = document.getElementById('nws-card');
+  const noaa = s.noaa;
+  if (!noaa || !noaa.lid) {
+    card.style.display = 'none';
+    return;
+  }
+  card.style.display = 'block';
+
+  const cat = noaa.current?.category || '—';
+  const catEl = document.getElementById('nws-cat');
+  catEl.textContent = cat.replace(/_/g, ' ');
+  catEl.className = `flood-cat-${cat}`;
+
+  const link = document.getElementById('nws-link');
+  link.href = `https://water.noaa.gov/gauges/${noaa.lid}`;
+
+  const stage = noaa.current?.stage_ft;
+  const flow = noaa.current?.flow_cfs;
+  const stageStr = stage != null
+    ? `${stage.toFixed(2)} ft${flow != null ? ` · ${Math.round(flow).toLocaleString()} cfs` : ''}`
+    : '—';
+  document.getElementById('nws-stage').textContent = stageStr;
+
+  const fc = noaa.nws_forecast?.stage_ft;
+  const fcTime = noaa.nws_forecast?.valid_time;
+  const fcStr = fc != null
+    ? `${fc.toFixed(2)} ft · ${fcTime ? FMT_FULL.format(new Date(fcTime)) : '—'}`
+    : '—';
+  document.getElementById('nws-fc').textContent = fcStr;
+
+  const th = noaa.thresholds_stage_ft || {};
+  const parts = [];
+  if (th.action != null)    parts.push(`A ${th.action}`);
+  if (th.minor != null)     parts.push(`Mn ${th.minor}`);
+  if (th.moderate != null)  parts.push(`Md ${th.moderate}`);
+  if (th.major != null)     parts.push(`Mj ${th.major}`);
+  document.getElementById('nws-thr').textContent = parts.length
+    ? parts.join(' / ') + ' ft' : '—';
 }
 
 function renderThresholdBar(th, nowFlow) {
@@ -483,6 +525,9 @@ function renderChart(s, pred) {
     { y: s.thresholds.extreme * conv, color: 'rgba(177,69,51,0.6)',  label: 'Q10' },
   ];
 
+  // NOAA National Water Model overlay (next 18 hours)
+  const nwm = (pred?.noaa_nwm || []).map(p => ({ x: p.t, y: p.flow_m3s * conv }));
+
   const datasets = [];
   if (obsData.length) datasets.push({
     label: 'Observed', data: obsData, borderColor: '#5fa3d6',
@@ -490,14 +535,19 @@ function renderChart(s, pred) {
     tension: 0.1, fill: true,
   });
   if (backtestPred.length) datasets.push({
-    label: 'Model nowcast (1h-ahead)', data: backtestPred,
+    label: 'DMV-CNN nowcast (1h-ahead)', data: backtestPred,
     borderColor: 'rgba(216,169,63,0.85)', backgroundColor: 'transparent',
     borderWidth: 1.2, pointRadius: 0, tension: 0.1, borderDash: [3, 3],
   });
   if (liveForecast.length) datasets.push({
-    label: '12h forecast', data: liveForecast, borderColor: '#d8a93f',
+    label: 'DMV-CNN 12h forecast', data: liveForecast, borderColor: '#d8a93f',
     backgroundColor: 'transparent', borderWidth: 2.5, pointRadius: 2.2,
     pointBackgroundColor: '#d8a93f', tension: 0.1,
+  });
+  if (nwm.length) datasets.push({
+    label: 'NOAA NWM 18h forecast', data: nwm, borderColor: '#a085c7',
+    backgroundColor: 'transparent', borderWidth: 1.8, pointRadius: 1.6,
+    pointBackgroundColor: '#a085c7', tension: 0.1, borderDash: [6, 3],
   });
 
   if (state.chart) state.chart.destroy();

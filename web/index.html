@@ -21,6 +21,7 @@
     --accent:     #d8a93f;     /* forecast amber */
     --observed:   #5fa3d6;     /* observed blue */
     --rain:       #8898c1;     /* precip slate */
+    --nwm:        #a085c7;     /* NOAA NWM violet */
     --ok:         #6b9c5b;
     --warn:       #d8a93f;
     --danger:     #c87544;
@@ -177,6 +178,29 @@
     box-shadow: 0 0 0 2px rgba(12,16,24,0.95);
   }
 
+  /* NWS card */
+  .nws-card { padding: 12px 18px 14px; border-bottom: 1px solid var(--rule); }
+  .nws-card .label {
+    font: 9.5px var(--mono); color: var(--paper-soft);
+    letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 8px;
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .nws-card .label b {
+    color: var(--paper); font-family: var(--mono); font-weight: 500;
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .nws-card .label b.flood-cat-no_flooding { color: var(--ok); }
+  .nws-card .label b.flood-cat-action      { color: var(--warn); }
+  .nws-card .label b.flood-cat-minor       { color: var(--warn); }
+  .nws-card .label b.flood-cat-moderate    { color: var(--danger); }
+  .nws-card .label b.flood-cat-major       { color: var(--extreme); }
+  .nws-card .label a { color: var(--paper-soft); text-decoration: underline dotted; }
+  .nws-card .label a:hover { color: var(--paper); }
+  .nws-card .nws-rows { font: 11px var(--mono); color: var(--paper); }
+  .nws-card .nws-row { display: grid; grid-template-columns: 1fr auto; padding: 3px 0; }
+  .nws-card .nws-row .k { color: var(--paper-soft); }
+  .nws-card .nws-row .v { font-variant-numeric: tabular-nums; }
+
   /* Mini gauge list */
   .other-gauges { padding: 12px 18px 18px; }
   .other-gauges .label {
@@ -246,6 +270,7 @@
   #chart-pane .head .legend i.obs   { background: var(--observed); }
   #chart-pane .head .legend i.now   { background: var(--accent); border: 1px dashed var(--accent); height: 0; }
   #chart-pane .head .legend i.fc    { background: var(--accent); height: 3px; }
+  #chart-pane .head .legend i.nwm   { background: var(--nwm); height: 3px; }
   #chart-pane .head .legend i.rain  { background: var(--rain); width: 6px; height: 10px; }
   .chart-wrap { position: relative; min-height: 0; }
   #chart { width: 100%; height: 100%; display: block; }
@@ -359,6 +384,27 @@
       <div class="bar-wrap" id="bar-wrap"></div>
     </div>
 
+    <div id="nws-card" class="nws-card" style="display:none">
+      <div class="label">
+        <span>NWS observation · <a id="nws-link" href="#" target="_blank" rel="noopener">AHPS</a></span>
+        <b id="nws-cat">—</b>
+      </div>
+      <div class="nws-rows">
+        <div class="nws-row">
+          <span class="k">stage now</span>
+          <span class="v" id="nws-stage">—</span>
+        </div>
+        <div class="nws-row">
+          <span class="k">NWS forecast</span>
+          <span class="v" id="nws-fc">—</span>
+        </div>
+        <div class="nws-row">
+          <span class="k">official flood stages</span>
+          <span class="v" id="nws-thr">—</span>
+        </div>
+      </div>
+    </div>
+
     <div class="other-gauges">
       <div class="label">Other monitored gauges</div>
       <div id="other-list"></div>
@@ -379,7 +425,8 @@
         <span class="legend">
           <span><i class="obs"></i> observed</span>
           <span><i class="now"></i> nowcast</span>
-          <span><i class="fc"></i> forecast</span>
+          <span><i class="fc"></i> DMV‑CNN 12h</span>
+          <span><i class="nwm"></i> NOAA NWM 18h</span>
         </span>
       </div>
       <div class="chart-wrap"><canvas id="chart"></canvas></div>
@@ -402,6 +449,7 @@ future (1ch × 12h) → Conv1D×2 → flatten
         <dt>Backtest</dt><dd id="model-bt-nse"><b>—</b> NSE / last 30 days</dd>
         <dt>Test NSE</dt><dd id="model-test-nse"><b>—</b> held-out 15% of 3yr</dd>
         <dt>Updated</dt><dd id="model-updated">—</dd>
+        <dt>Overlay</dt><dd>NOAA NWM short-range (18h hourly), pulled from <a href="https://api.water.noaa.gov/nwps/v1/docs/" target="_blank">api.water.noaa.gov</a></dd>
       </dl>
 
       <div class="precip">

@@ -81,12 +81,27 @@ def main():
         except Exception as e:
             print(f'   live USGS fetch failed: {e}')
 
+    # Per-site NOAA NWPS lookup — adds official flood thresholds + NWS
+    # observed/forecast stage. Runs for every CNN site, not just new ones,
+    # so the data refreshes each cron tick.
+    from . import noaa
+    print('-- enriching sites with NOAA NWPS data')
+    for s in sites_json['sites']:
+        gauge = noaa.fetch_gauge(s['id'])
+        if gauge:
+            s['noaa'] = gauge
+            cat = gauge['current'].get('category') or '—'
+            stage = gauge['current'].get('stage_ft')
+            print(f'   {s["id"]} lid={gauge["lid"]}  current {stage}ft  cat={cat}')
+
     new_sites = []
     for s in SITES:
         if s['id'] in existing_ids:
             continue
         th = site_thresholds(s['id'])
         live = live_obs_by_id.get(s['id'], [])
+        # NOAA gauge record (flood thresholds + NWS current/forecast)
+        gauge_noaa = noaa.fetch_gauge(s['id'])
         new_sites.append({
             'id': s['id'],
             'name': s['name'],
@@ -100,6 +115,7 @@ def main():
             'live_now': (live[-1] if live else None) and {'t': live[-1]['d'] + 'T12:00Z', 'o': live[-1]['o']},
             'precip_forecast_mm': [],
             'kind': s['kind'],
+            'noaa': gauge_noaa,
         })
         flow_now = live[-1]['o'] if live else None
         print(f'   + {s["id"]}  {s["short"]:<16}  '
