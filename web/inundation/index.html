@@ -202,8 +202,10 @@
 </div>
 
 <div class="footnote">
-  Terrain: <a href="https://opendata.dc.gov/" style="color:inherit">OpenData DC LiDAR DSM 2020</a><br>
-  Inundation polygons: USGS 3DEP 10 m DEM → HAND (WhiteboxTools) → threshold at NWS stage
+  Terrain: USGS 3DEP 30 m bare-earth DEM (via National Map ImageServer)<br>
+  HAND: WhiteboxTools (stand-in for NOAA's published FIM — that one's at
+  <code>s3://noaa-nws-owp-fim</code> and needs ESIP credentials)<br>
+  Inundation: HAND ≤ NWS stage, clipped to a 100 m radius around each gauge
 </div>
 
 <script src="https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.js" crossorigin></script>
@@ -231,7 +233,7 @@ const map = new maplibregl.Map({
         tiles: [location.origin + location.pathname.replace(/[^/]*$/, '') + 'terrain/{z}/{x}/{y}.png'],
         tileSize: 256,
         encoding: 'mapbox',
-        maxzoom: 15,
+        maxzoom: 13,    // DEM is ~30 m; tiles beyond z=13 don't add detail
       },
       water: {
         type: 'geojson',
@@ -405,13 +407,26 @@ map.on('load', () => {
       if (ft == null) continue;
       const id = polyId(g.lid, stage, ft);
       map.addSource(id, { type: 'geojson', data: `${id}.geojson` });
+      // Two-layer rendering so the small 100m polygons remain visible
+      // even when zoomed out: a flat outline + a 3D extrusion at stage
+      // height for the "video game" effect when zoomed in.
+      map.addSource(id, { type: 'geojson', data: `${id}.geojson` });
+      map.addLayer({
+        id: id + '-fill', type: 'fill', source: id,
+        paint: {
+          'fill-color': STAGE_COLORS[stage],
+          'fill-opacity': 0.55,
+          'fill-outline-color': STAGE_COLORS[stage],
+        },
+        layout: { visibility: 'none' },
+      });
       map.addLayer({
         id, type: 'fill-extrusion', source: id,
         paint: {
           'fill-extrusion-color': STAGE_COLORS[stage],
-          'fill-extrusion-opacity': 0.55,
+          'fill-extrusion-opacity': 0.7,
           'fill-extrusion-base': 0,
-          'fill-extrusion-height': ['+', ['get', 'stage_ft'], 0.5],
+          'fill-extrusion-height': ['*', ['get', 'stage_ft'], 0.3048],
         },
         layout: { visibility: 'none' },
       });
@@ -455,9 +470,10 @@ function refreshHandVisibility() {
       const ft = g[stage];
       if (ft == null) continue;
       const id = polyId(g.lid, stage, ft);
-      if (!map.getLayer(id)) continue;
       const show = stage === currentStage && enabledLids.has(g.lid);
-      map.setLayoutProperty(id, 'visibility', show ? 'visible' : 'none');
+      const vis = show ? 'visible' : 'none';
+      if (map.getLayer(id))           map.setLayoutProperty(id, 'visibility', vis);
+      if (map.getLayer(id + '-fill')) map.setLayoutProperty(id + '-fill', 'visibility', vis);
     }
   }
 }

@@ -28,25 +28,31 @@ import mercantile
 from PIL import Image
 
 REPO = Path(__file__).resolve().parents[1]
-DSM_SRC = Path('/Users/pluto/Downloads/OpenDataDC_LiDAR_DSM_2020/DSM.tif')
 WORK_DIR = REPO / 'inundation-data'
 WORK_DIR.mkdir(parents=True, exist_ok=True)
-TERRAIN_TIF = WORK_DIR / 'dc_dsm_3857_3m.tif'
+# Default: render the bare-earth USGS 3DEP DEM (what HAND was computed on)
+# so the 3D terrain matches the hydrology. Pass --dsm to use the LiDAR DSM
+# instead (includes buildings, more dramatic but mismatches HAND).
+DEM_SRC = WORK_DIR / 'aoi_dem.tif'
+DSM_SRC = Path('/Users/pluto/Downloads/OpenDataDC_LiDAR_DSM_2020/DSM.tif')
+TERRAIN_TIF = WORK_DIR / 'aoi_terrain_3857.tif'
 TILE_DIR = REPO / 'web' / 'inundation' / 'terrain'
 
-ZOOM_MIN, ZOOM_MAX = 10, 15
+ZOOM_MIN, ZOOM_MAX = 10, 13   # DEM is ~30 m; beyond z=13 we're just
+                              # upsampling pixels with no extra detail.
 TILE_SIZE = 256
 TARGET_RES_M = 3.0     # downsample resolution in meters (Web Mercator)
 
 
-def reproject_and_downsample():
-    """One-time: reproject + resample the DSM to Web Mercator at ~3m."""
-    if TERRAIN_TIF.exists() and TERRAIN_TIF.stat().st_size > 1_000_000:
+def reproject_and_downsample(source: Path | None = None):
+    """Reproject + resample the source raster to Web Mercator at TARGET_RES_M."""
+    source = source or DEM_SRC
+    if TERRAIN_TIF.exists() and TERRAIN_TIF.stat().st_size > 100_000:
         print(f'  cached: {TERRAIN_TIF} ({TERRAIN_TIF.stat().st_size//(1024*1024)} MB)')
         return TERRAIN_TIF
 
-    print(f'  reprojecting {DSM_SRC.name} → EPSG:3857 @ {TARGET_RES_M} m')
-    with rasterio.open(DSM_SRC) as src:
+    print(f'  reprojecting {source.name} → EPSG:3857 @ {TARGET_RES_M} m')
+    with rasterio.open(source) as src:
         dst_crs = 'EPSG:3857'
         # Compute the destination transform/size sized at our target resolution
         transform, width, height = calculate_default_transform(
@@ -144,15 +150,20 @@ def render_pyramid(geotiff: Path):
 
 
 if __name__ == '__main__':
-    if not DSM_SRC.exists():
-        raise SystemExit(f'DSM not found at {DSM_SRC}')
+    import sys
+    use_dsm = '--dsm' in sys.argv
+    source = DSM_SRC if use_dsm else DEM_SRC
+    if not source.exists():
+        raise SystemExit(f'source not found at {source}')
     if TILE_DIR.exists():
         print(f'wiping existing tiles: {TILE_DIR}')
         import shutil
         shutil.rmtree(TILE_DIR)
     TILE_DIR.mkdir(parents=True)
-    print('1/2 reproject + downsample DSM')
-    geotiff = reproject_and_downsample()
+    if TERRAIN_TIF.exists():
+        TERRAIN_TIF.unlink()
+    print(f'1/2 reproject + downsample {"DSM" if use_dsm else "DEM"}')
+    geotiff = reproject_and_downsample(source)
     print('2/2 render terrain-RGB tile pyramid')
     render_pyramid(geotiff)
     print(f'done. terrain tiles at {TILE_DIR}')

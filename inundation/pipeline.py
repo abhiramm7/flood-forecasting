@@ -45,11 +45,17 @@ def main():
         if fc_stage is not None:
             stages['nws_forecast'] = fc_stage
 
-        print(f'\n{lid} ({site["name"]})')
+        gauge_lonlat = (site.get('lon'), site.get('lat'))
+        if None in gauge_lonlat:
+            gauge_lonlat = None
+
+        print(f'\n{lid} ({site["name"]})  buffer: 100 m around gauge')
         for label, stage in stages.items():
             print(f'  stage {label} = {stage} ft')
-            inundate(HAND, stage, f'{lid}_{label}',
-                      gauge_meta={'site_id': site['id'], 'level': label})
+            inundate(HAND, stage, f'{lid}_{label}_{stage:g}ft',
+                      gauge_meta={'site_id': site['id'], 'level': label},
+                      gauge_lonlat=gauge_lonlat,
+                      buffer_m=100)
 
 
 if __name__ == '__main__':

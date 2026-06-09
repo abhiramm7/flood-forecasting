@@ -27,21 +27,28 @@ FT_TO_M = 0.3048
 
 
 def inundate(hand_path: Path, stage_ft: float, lid: str,
-              gauge_meta: dict | None = None) -> Path:
+              gauge_meta: dict | None = None,
+              gauge_lonlat: tuple[float, float] | None = None,
+              buffer_m: float | None = 100.0) -> Path | None:
     """One forecast stage → one GeoJSON polygon.
 
     Args:
         hand_path: path to the precomputed HAND raster
-        stage_ft: forecast or threshold stage above the local stream (NWS
-                   AHPS units are feet). HAND ≤ this stage = inundated.
+        stage_ft: stage above the local stream (NWS AHPS units, feet).
+                   HAND ≤ this stage = inundated.
         lid: NWPS gauge id, used in the output filename
         gauge_meta: optional extra metadata baked into the GeoJSON props
+        gauge_lonlat: (lon, lat) of the gauge. If supplied with
+                       buffer_m, the inundation polygon is clipped to a
+                       circle around the gauge — focuses the viz on
+                       gauge-vicinity flooding instead of the whole AOI.
+        buffer_m: radius of the clip circle in meters. Pass None to skip.
     """
     import rasterio
     from rasterio import features
     import numpy as np
-    from shapely.geometry import shape, mapping
-    from shapely.ops import transform as shape_transform
+    from shapely.geometry import shape, mapping, Point
+    from shapely.ops import transform as shape_transform, unary_union
     import pyproj
 
     stage_m = stage_ft * FT_TO_M
@@ -63,14 +70,24 @@ def inundate(hand_path: Path, stage_ft: float, lid: str,
         print(f'  no inundated pixels at stage {stage_ft} ft')
         return None
 
-    # Merge component polygons + simplify in source CRS. Tolerance of one
-    # raster cell (~30m) keeps a "stair-step pixel" look from leaking into
-    # the GeoJSON; we drop micro-polygons under 0.01 km² to cut file size.
-    from shapely.ops import unary_union
     merged = unary_union(geoms)
+
+    # Clip to a buffer around the gauge so the polygon describes
+    # gauge-vicinity flooding instead of the whole AOI.
+    if gauge_lonlat is not None and buffer_m is not None:
+        to_src = pyproj.Transformer.from_crs(
+            'EPSG:4326', crs, always_xy=True).transform
+        gx, gy = to_src(gauge_lonlat[0], gauge_lonlat[1])
+        buf = Point(gx, gy).buffer(buffer_m, resolution=24)
+        merged = merged.intersection(buf)
+        if merged.is_empty:
+            print(f'  stage {stage_ft} ft: no inundation within {buffer_m} m of gauge')
+            return None
+
+    # Simplify and drop micro-polygons. Tolerance is ~one raster cell.
     if hasattr(merged, 'geoms'):
-        merged = type(merged)([g for g in merged.geoms if g.area > 10_000])
-    merged = merged.simplify(60.0, preserve_topology=True)
+        merged = type(merged)([g for g in merged.geoms if g.area > 100])
+    merged = merged.simplify(5.0, preserve_topology=True)
 
     # Reproject to WGS84 lat/lon for Leaflet
     project = pyproj.Transformer.from_crs(crs, 'EPSG:4326', always_xy=True).transform
@@ -82,11 +99,12 @@ def inundate(hand_path: Path, stage_ft: float, lid: str,
         'properties': {
             'lid': lid,
             'stage_ft': stage_ft,
+            'buffer_m': buffer_m,
             **(gauge_meta or {}),
         },
     }
     fc = {'type': 'FeatureCollection', 'features': [feature]}
-    out_path = OUT_WEB / f'{lid}_{stage_ft:g}ft.geojson'
+    out_path = OUT_WEB / f'{lid}.geojson'
     out_path.write_text(json.dumps(fc, separators=(',', ':')))
     print(f'  wrote {out_path.name} ({out_path.stat().st_size // 1024} KB)')
     return out_path
