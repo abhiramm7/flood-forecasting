@@ -1,0 +1,12 @@
+# Inundation pipeline deps (in addition to the CNN's requirements-ci.txt).
+# Heavy GIS stack — install only on the box that runs the inundation
+# precompute, not in CI.
+
+rasterio>=1.4              # GeoTIFF read/write + raster.features.shapes
+geopandas>=1.0             # vector polygon ops + GeoJSON I/O
+shapely>=2.0               # polygon simplify, buffer
+pyproj>=3.6                # CRS reprojection
+whitebox>=2.3              # HAND + flow accumulation (TauDEM-like)
+fiona>=1.10                # vector I/O backend for geopandas
+boto3                      # S3 access for USGS 3DEP COGs
+hydrotools.nwm-client      # NWM short-range pulls
