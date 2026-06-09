@@ -23,35 +23,52 @@ from pathlib import Path
 
 OUT_DIR = Path(__file__).resolve().parents[1] / 'inundation-data'
 
-# Cells with at least N upstream cells become "streams". 4000 cells at
-# 10 m resolution ≈ 0.4 km² drainage; reasonable for headwater channels.
-STREAM_THRESHOLD = 4000
+# Cells with at least N upstream cells become "streams". 500 cells at
+# 30 m resolution ≈ 0.45 km² drainage; reasonable for headwater channels
+# in this AOI without flooding the network with every drainage swale.
+STREAM_THRESHOLD = 500
 
 
 def compute_hand(dem_path: Path) -> Path:
-    """Returns the path to the HAND GeoTIFF."""
+    """Returns the path to the HAND GeoTIFF. WBT requires the input DEM
+    to live in the working directory and filenames passed as relative."""
+    import shutil
     import whitebox
+
+    # WBT is finicky: with a working directory set, all paths must be
+    # relative to that directory. Copy the input DEM into our work dir
+    # if it isn't already there, then talk to WBT in relative terms.
+    dem_path = Path(dem_path)
+    if dem_path.parent.resolve() != OUT_DIR.resolve():
+        target = OUT_DIR / dem_path.name
+        if not target.exists():
+            shutil.copy(dem_path, target)
+        dem_path = target
+
     wbt = whitebox.WhiteboxTools()
     wbt.set_working_dir(str(OUT_DIR))
     wbt.set_verbose_mode(True)
+    wbt.set_compress_rasters(True)
 
-    filled = OUT_DIR / 'dc_dem_filled.tif'
-    fdir = OUT_DIR / 'dc_d8_dir.tif'
-    facc = OUT_DIR / 'dc_d8_acc.tif'
-    streams = OUT_DIR / 'dc_streams.tif'
-    hand = OUT_DIR / 'dc_hand.tif'
+    stem = dem_path.stem
+    filled = f'{stem}_filled.tif'
+    fdir = f'{stem}_d8_dir.tif'
+    facc = f'{stem}_d8_acc.tif'
+    streams = f'{stem}_streams.tif'
+    hand = f'{stem}_hand.tif'
 
     print('1/4 fill depressions')
-    wbt.fill_depressions(str(dem_path), str(filled))
+    wbt.fill_depressions(dem_path.name, filled)
     print('2/4 D8 flow direction')
-    wbt.d8_pointer(str(filled), str(fdir))
+    wbt.d8_pointer(filled, fdir)
     print('3/4 flow accumulation + stream threshold')
-    wbt.d8_flow_accumulation(str(filled), str(facc), out_type='cells')
-    wbt.extract_streams(str(facc), str(streams), threshold=STREAM_THRESHOLD)
+    wbt.d8_flow_accumulation(filled, facc, out_type='cells')
+    wbt.extract_streams(facc, streams, threshold=STREAM_THRESHOLD)
     print('4/4 elevation above stream (the HAND raster)')
-    wbt.elevation_above_stream(str(filled), str(streams), str(hand))
-    print(f'  wrote {hand}')
-    return hand
+    wbt.elevation_above_stream(filled, streams, hand)
+    hand_path = OUT_DIR / hand
+    print(f'  wrote {hand_path}')
+    return hand_path
 
 
 if __name__ == '__main__':

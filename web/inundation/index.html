@@ -93,6 +93,40 @@
   .presets button:hover { color: var(--paper); border-color: var(--paper-soft); }
   .presets button.on { background: var(--accent); color: var(--ink); border-color: var(--accent); }
 
+  /* HAND polygon overlay controls */
+  .hand-panel {
+    position: absolute; right: 22px; top: 70px; z-index: 5;
+    background: rgba(12,16,24,0.85); backdrop-filter: blur(10px);
+    border: 1px solid var(--rule); border-radius: 4px;
+    padding: 12px 14px 10px; width: 240px;
+  }
+  .hand-panel .kicker {
+    font: 9.5px var(--mono); color: var(--paper-soft);
+    letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 8px;
+  }
+  .hand-panel .stage-pills { display: flex; gap: 3px; margin-bottom: 10px; }
+  .hand-panel .stage-pills button {
+    background: transparent; border: 1px solid var(--rule); color: var(--paper-soft);
+    padding: 3px 8px; font: 9px var(--mono); cursor: pointer; flex: 1;
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .hand-panel .stage-pills button.on { color: var(--ink); }
+  .hand-panel .stage-pills button.action.on    { background: #c2a73b; border-color: #c2a73b; }
+  .hand-panel .stage-pills button.minor.on     { background: #d8a93f; border-color: #d8a93f; }
+  .hand-panel .stage-pills button.moderate.on  { background: #c87544; border-color: #c87544; }
+  .hand-panel .stage-pills button.major.on     { background: #b14533; border-color: #b14533; }
+  .hand-panel .gauge-rows { font: 10px var(--mono); }
+  .hand-panel .gauge-row {
+    display: grid; grid-template-columns: auto 1fr auto;
+    gap: 6px; align-items: center; padding: 3px 0;
+    border-bottom: 1px dotted var(--rule);
+  }
+  .hand-panel .gauge-row:last-child { border-bottom: none; }
+  .hand-panel .gauge-row input[type=checkbox] { accent-color: var(--accent); margin: 0; }
+  .hand-panel .gauge-row label { color: var(--paper); cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hand-panel .gauge-row .ft { color: var(--paper-soft); font-size: 9px; }
+
   .ctrl-row {
     display: flex; gap: 14px; align-items: center;
     margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--rule);
@@ -156,10 +190,20 @@
   </div>
 </div>
 
+<div class="hand-panel">
+  <div class="kicker">HAND inundation by gauge</div>
+  <div class="stage-pills" id="stage-pills">
+    <button data-stage="action"   class="action">Action</button>
+    <button data-stage="minor"    class="minor on">Minor</button>
+    <button data-stage="moderate" class="moderate">Moderate</button>
+    <button data-stage="major"    class="major">Major</button>
+  </div>
+  <div class="gauge-rows" id="gauge-rows"></div>
+</div>
+
 <div class="footnote">
-  Terrain: <a href="https://opendata.dc.gov/" style="color:inherit">OpenData DC LiDAR DSM 2020</a> (1 m, resampled to 3 m)<br>
-  Inundation: bathtub at constant elevation — coarse but illustrative.
-  Buildings appear as DSM bumps because lidar saw them.
+  Terrain: <a href="https://opendata.dc.gov/" style="color:inherit">OpenData DC LiDAR DSM 2020</a><br>
+  Inundation polygons: USGS 3DEP 10 m DEM → HAND (WhiteboxTools) → threshold at NWS stage
 </div>
 
 <script src="https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.js" crossorigin></script>
@@ -318,6 +362,114 @@ map.on('load', () => {
     map.easeTo({ center: DC_CENTER, zoom: 12.5, pitch: 65, bearing: -25, duration: 4000 });
   }, 400);
 });
+
+// ---- HAND polygon overlays --------------------------------------------
+// The polygons are pre-computed: for each NWS-lid gauge, four stage
+// scenarios (action / minor / moderate / major). We add them all as
+// MapLibre sources once and toggle visibility on demand.
+
+const HAND_GAUGES = [
+  { lid: 'BRKM2', name: 'Potomac at Little Falls',
+    action: 5,  minor: 10, moderate: 12, major: 14 },
+  { lid: 'RCKD2', name: 'Rock Creek at Sherrill Dr',
+    action: 6,  minor: 7,  moderate: 10, major: 12 },
+  { lid: 'RVDM2', name: 'NE Branch Anacostia',
+    action: 7,  minor: 8,  moderate: 13, major: 16 },
+  { lid: 'CLAM2', name: 'NW Branch Anacostia',
+    action: 6,  minor: 9,  moderate: 12, major: 19 },
+  { lid: 'WATD2', name: 'Watts Branch DC',
+    action: 9,  minor: 10, moderate: 12, major: null },
+  { lid: 'GFLV2', name: 'Difficult Run',
+    action: 9,  minor: 11, moderate: 13, major: 20 },
+];
+
+const STAGE_COLORS = {
+  action:   '#c2a73b',
+  minor:    '#d8a93f',
+  moderate: '#c87544',
+  major:    '#b14533',
+};
+
+let currentStage = 'minor';
+const enabledLids = new Set(HAND_GAUGES.map(g => g.lid));
+
+function polyId(lid, stage, ft) {
+  return `${lid}_${stage}_${ft}ft`;
+}
+
+map.on('load', () => {
+  // Register every source + layer once. Visibility toggled per stage / gauge.
+  for (const g of HAND_GAUGES) {
+    for (const stage of ['action', 'minor', 'moderate', 'major']) {
+      const ft = g[stage];
+      if (ft == null) continue;
+      const id = polyId(g.lid, stage, ft);
+      map.addSource(id, { type: 'geojson', data: `${id}.geojson` });
+      map.addLayer({
+        id, type: 'fill-extrusion', source: id,
+        paint: {
+          'fill-extrusion-color': STAGE_COLORS[stage],
+          'fill-extrusion-opacity': 0.55,
+          'fill-extrusion-base': 0,
+          'fill-extrusion-height': ['+', ['get', 'stage_ft'], 0.5],
+        },
+        layout: { visibility: 'none' },
+      });
+    }
+  }
+  refreshHandVisibility();
+
+  // Build the gauge-row UI
+  const rows = document.getElementById('gauge-rows');
+  for (const g of HAND_GAUGES) {
+    const div = document.createElement('div');
+    div.className = 'gauge-row';
+    div.innerHTML = `
+      <input type="checkbox" id="gauge-${g.lid}" checked>
+      <label for="gauge-${g.lid}" title="${g.name}">${g.name.replace('NW Branch ', 'NW ').replace('NE Branch ', 'NE ').replace(' at ', ' @ ')}</label>
+      <span class="ft" id="ft-${g.lid}">— ft</span>
+    `;
+    div.querySelector('input').addEventListener('change', e => {
+      if (e.target.checked) enabledLids.add(g.lid);
+      else enabledLids.delete(g.lid);
+      refreshHandVisibility();
+    });
+    rows.appendChild(div);
+  }
+  refreshFtLabels();
+});
+
+document.getElementById('stage-pills').addEventListener('click', e => {
+  if (e.target.tagName !== 'BUTTON') return;
+  currentStage = e.target.dataset.stage;
+  document.querySelectorAll('#stage-pills button').forEach(b => {
+    b.classList.toggle('on', b.dataset.stage === currentStage);
+  });
+  refreshHandVisibility();
+  refreshFtLabels();
+});
+
+function refreshHandVisibility() {
+  for (const g of HAND_GAUGES) {
+    for (const stage of ['action', 'minor', 'moderate', 'major']) {
+      const ft = g[stage];
+      if (ft == null) continue;
+      const id = polyId(g.lid, stage, ft);
+      if (!map.getLayer(id)) continue;
+      const show = stage === currentStage && enabledLids.has(g.lid);
+      map.setLayoutProperty(id, 'visibility', show ? 'visible' : 'none');
+    }
+  }
+}
+
+function refreshFtLabels() {
+  for (const g of HAND_GAUGES) {
+    const el = document.getElementById('ft-' + g.lid);
+    if (!el) continue;
+    const ft = g[currentStage];
+    el.textContent = ft != null ? `${ft} ft` : '—';
+  }
+}
 </script>
 
 </body>

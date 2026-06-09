@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-HAND = REPO / 'inundation-data' / 'dc_hand.tif'
+HAND = REPO / 'inundation-data' / 'aoi_dem_hand.tif'
 SITES = REPO / 'web' / 'sites.json'
 
 

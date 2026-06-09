@@ -63,9 +63,14 @@ def inundate(hand_path: Path, stage_ft: float, lid: str,
         print(f'  no inundated pixels at stage {stage_ft} ft')
         return None
 
-    # Merge component polygons + simplify in source CRS (meters tolerance OK)
+    # Merge component polygons + simplify in source CRS. Tolerance of one
+    # raster cell (~30m) keeps a "stair-step pixel" look from leaking into
+    # the GeoJSON; we drop micro-polygons under 0.01 km² to cut file size.
     from shapely.ops import unary_union
-    merged = unary_union(geoms).simplify(5.0, preserve_topology=True)
+    merged = unary_union(geoms)
+    if hasattr(merged, 'geoms'):
+        merged = type(merged)([g for g in merged.geoms if g.area > 10_000])
+    merged = merged.simplify(60.0, preserve_topology=True)
 
     # Reproject to WGS84 lat/lon for Leaflet
     project = pyproj.Transformer.from_crs(crs, 'EPSG:4326', always_xy=True).transform
@@ -89,7 +94,7 @@ def inundate(hand_path: Path, stage_ft: float, lid: str,
 
 if __name__ == '__main__':
     import sys
-    HAND_DEFAULT = REPO / 'inundation-data' / 'dc_hand.tif'
+    HAND_DEFAULT = REPO / 'inundation-data' / 'aoi_dem_hand.tif'
     hand_path = Path(sys.argv[1]) if len(sys.argv) > 1 else HAND_DEFAULT
     lid = sys.argv[2] if len(sys.argv) > 2 else 'TEST'
     stage = float(sys.argv[3]) if len(sys.argv) > 3 else 10.0
